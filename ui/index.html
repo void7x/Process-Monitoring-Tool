@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f7fb">
+  <meta name="description" content="Real-time process monitoring across Windows and Linux hosts">
+  <title>Process Monitor</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="brand-copy"><strong>Process<span>Monitor</span></strong><small>Operations console</small></div>
+        <button class="icon-button sidebar-close" id="sidebarClose" type="button" aria-label="Close navigation" title="Close navigation">×</button>
+      </div>
+      <div class="workspace-label">Workspace</div>
+      <nav class="nav-list" id="primaryNav">
+        <a href="#overview" data-page="overview" class="nav-item active"><span class="nav-icon" data-icon="grid"></span><span>Overview</span></a>
+        <a href="#hosts" data-page="hosts" class="nav-item"><span class="nav-icon" data-icon="server"></span><span>Hosts</span></a>
+        <a href="#processes" data-page="processes" class="nav-item"><span class="nav-icon" data-icon="process"></span><span>Processes</span></a>
+        <a href="#alerts" data-page="alerts" class="nav-item"><span class="nav-icon" data-icon="bell"></span><span>Alerts</span><span class="nav-count" id="sidebarAlertCount" hidden>0</span></a>
+        <a href="#rules" data-page="rules" class="nav-item"><span class="nav-icon" data-icon="sliders"></span><span>Rules</span></a>
+        <a href="#history" data-page="history" class="nav-item"><span class="nav-icon" data-icon="history"></span><span>History</span></a>
+      </nav>
+      <div class="workspace-label nav-secondary-label">Workspace tools</div>
+      <nav class="nav-list">
+        <a href="#settings" data-page="settings" class="nav-item"><span class="nav-icon" data-icon="settings"></span><span>Settings</span></a>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-footer">
+        <div class="collector-mini-status"><span class="status-dot" id="sidebarStatusDot"></span><div><strong id="sidebarConnectionText">Connecting…</strong><small>Collector connection</small></div></div>
+        <div class="sidebar-version"><span>Version 1.0.0</span><span class="status-badge neutral">Light</span></div>
+      </div>
+    </aside>
+    <div class="sidebar-scrim" id="sidebarScrim" hidden></div>
+
+    <main class="main-shell">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-button menu-button" id="sidebarOpen" type="button" aria-label="Open navigation" title="Open navigation"><span data-icon="menu"></span></button>
+          <div class="page-heading"><span class="eyebrow" id="pageEyebrow">Monitoring</span><h1 id="pageTitle">Overview</h1></div>
+        </div>
+        <div class="topbar-actions">
+          <div class="global-search-wrap">
+            <span class="search-leading" data-icon="search"></span>
+            <input id="globalSearch" class="global-search" type="search" autocomplete="off" placeholder="Search processes, hosts, alerts…" aria-label="Search processes, hosts, and alerts">
+            <kbd>⌘ K</kbd>
+            <div id="globalSearchResults" class="global-search-results" hidden></div>
+          </div>
+          <div class="connection-pill" id="connectionPill"><span class="status-dot"></span><span id="connectionText">Connecting</span></div>
+          <button class="icon-button" id="refreshButton" type="button" aria-label="Refresh dashboard" title="Refresh dashboard"><span data-icon="refresh"></span></button>
+          <button class="avatar-button" type="button" aria-label="User menu" title="User menu">OP</button>
+        </div>
+      </header>
+      <div class="update-bar">
+        <div class="update-copy"><span class="live-pulse" id="livePulse"></span><span id="updateText">Waiting for first update</span></div>
+        <div class="update-actions"><button class="text-button" id="liveToggle" type="button"><span data-icon="pause"></span><span>Pause updates</span></button><span class="separator"></span><span>Refresh <strong id="refreshIntervalLabel">30s</strong></span></div>
+      </div>
+      <div id="offlineBanner" class="offline-banner" hidden role="alert"><span data-icon="cloud-off"></span><div><strong>Collector unavailable</strong><span id="offlineMessage">Check whether the collector service is running.</span></div><button class="button small secondary" id="retryButton" type="button">Retry now</button></div>
+      <section id="pageContent" class="page-content" tabindex="-1"></section>
+    </main>
+  </div>
+  <div id="drawerRoot"></div>
+  <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <script src="app.js"></script>
+</body>
+</html>
