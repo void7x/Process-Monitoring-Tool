@@ -5,49 +5,28 @@ const assert = require("node:assert/strict");
 
 const { createDom, loadApp, makeFetchMock, wait, waitFor } = require("./dom");
 
-// Track windows so we can clean up intervals after each test and avoid hanging
-// when multiple test files are run together via `node --test ui/tests/*.test.js`.
-const _openWindows = new Set();
-const _origCreateDom = createDom;
-function _trackedCreateDom(...args) {
-  const dom = _origCreateDom(...args);
-  _openWindows.add(dom);
-  return dom;
-}
-// Monkey-patch the helper used by tests via closure - expose tracked version
-// Tests that use `createDom` directly will now be tracked; we also patch `setup`.
-
+const _doms = [];
+test.afterEach(() => {
+  while (_doms.length) {
+    const entry = _doms.pop();
+    try { entry.window.__processMonitor?.cleanup?.(); } catch {}
+    // keep window alive to avoid async write-after-close unhandledRejection in rule-form test
+  }
+});
 
 function setup({ routes }) {
-  const dom = _trackedCreateDom();
+  const dom = createDom();
+  _doms.push(dom);
   const window = dom.window;
-  // Install a controllable fetch mock.
   window.fetch = makeFetchMock(routes);
-  // Start in a known page state.
   window.location.hash = "#overview";
   const app = loadApp(dom);
   return { dom, window, app };
 }
 
-// Ensure JSDOM windows are closed after each test to clear intervals
-const { afterEach } = require("node:test");
-afterEach(() => {
-  for (const dom of Array.from(_openWindows)) {
-    try {
-      const win = dom.window;
-      if (win && win.__processMonitor && win.__processMonitor.cleanup) win.__processMonitor.cleanup();
-    } catch (_) {}
-    // Do not close the window immediately - async test callbacks may still
-    // reference the document.  Clearing intervals is sufficient to let the
-    // Node event loop exit.  The JSDOM window will be GC'd after the test.
-    // Intentionally keep the dom in the set until next test's cleanup to
-    // avoid double-close errors - but we still remove it to prevent leak.
-    _openWindows.delete(dom);
-  }
-});
-
 test("app.js loads without throwing", () => {
-  const dom = _trackedCreateDom();
+  const dom = createDom();
+  _doms.push(dom);
   const window = dom.window;
   window.fetch = makeFetchMock({
     "/summary": { kpis: {}, hosts: [] },
@@ -82,21 +61,29 @@ test("overview renders KPI cards when API responds", async () => {
         activity: [{ timestamp: 1, value: 5 }],
         alerts: [],
       },
+      "/alerts": { items: [], total: 0, limit: 6, offset: 0 },
     },
   });
   await waitFor(() => {
     const cards = window.document.querySelectorAll(".kpi-card");
-    return cards.length >= 5;
+    return cards.length >= 4;
   });
   const text = window.document.getElementById("pageContent").textContent;
+  assert.match(text, /Process Monitoring/);
   assert.match(text, /17/); // running processes value
-  assert.match(text, /Active alerts/);
-  assert.match(text, /Live hosts/);
-  assert.match(text, /Observed CPU/);
+  assert.match(text, /Active Alerts/);
+  assert.match(text, /Hosts/);
+  assert.match(text, /Samples/);
+  assert.match(text, /CPU ACTIVITY/);
+  assert.match(text, /MEMORY ACTIVITY/);
+  assert.match(text, /SYSTEM HEALTH/);
   // KPI cards carry a tone class for the colored left border.
   assert.ok(window.document.querySelector(".kpi-card.tone-green"), "green-tone KPI must have tone class");
   assert.ok(window.document.querySelector(".kpi-card.tone-red"), "red-tone KPI must have tone class");
   assert.ok(window.document.querySelector(".kpi-card.tone-purple"), "purple-tone KPI must have tone class");
+  // charts should render SVG when data exists
+  assert.ok(window.document.querySelector("#overviewCpuChart svg"), "CPU chart should render SVG");
+  assert.ok(window.document.querySelector("#overviewMemoryChart svg"), "Memory chart should render SVG");
 });
 
 test("process list renders rows from /processes", async () => {
@@ -123,6 +110,11 @@ test("process list renders rows from /processes", async () => {
   const text = window.document.getElementById("pageContent").textContent;
   assert.match(text, /alpha/);
   assert.match(text, /100/);
+  // new composition: table headers PROCESS/PID/CPU/MEMORY/STATE/ACTION
+  const headerText = window.document.querySelector("#processTable thead").textContent;
+  assert.match(headerText, /PROCESS/);
+  assert.match(headerText, /PID/);
+  assert.match(headerText, /STATE/);
 });
 
 test("process list empty state", async () => {
@@ -187,6 +179,8 @@ test("alerts page renders alert list", async () => {
   assert.ok(window.document.querySelector(".alert-row.alert-critical"), "critical class must be applied");
   assert.ok(window.document.querySelector(".alert-row.alert-warning"), "warning class must be applied");
   assert.ok(window.document.querySelector(".alert-row.alert-resolved"), "resolved class must be applied");
+  // scannable View Incident button
+  assert.ok(window.document.querySelector('[data-action="view-incident"]'), "View Incident must be present");
 });
 
 test("alerts page empty state when no alerts", async () => {
@@ -227,7 +221,8 @@ test("rules page lists alert rules", async () => {
 
 test("rule form submit POSTs to /alerts/rules", async () => {
   const posts = [];
-  const dom = _trackedCreateDom();
+  const dom = createDom();
+  _doms.push(dom);
   const window = dom.window;
   const calls = [];
   window.fetch = (url, init) => {
@@ -341,8 +336,6 @@ test("process search input is debounced and forwarded", async () => {
   window.location.hash = "#processes";
   window.dispatchEvent(new window.HashChangeEvent("hashchange"));
   await wait(100);
-  // The toolbar is rendered before the API call returns, so the search
-  // input is present immediately.  We don't need to wait for the table.
   await waitFor(() => window.document.getElementById("processSearch") !== null, { timeout: 3000 });
   const search = window.document.getElementById("processSearch");
   assert.ok(search, "processSearch input must be present");
@@ -377,9 +370,9 @@ test("history page renders retained samples", async () => {
 });
 
 test("API failure sets the connection pill to offline", async () => {
-  const dom = _trackedCreateDom();
+  const dom = createDom();
+  _doms.push(dom);
   const window = dom.window;
-  // Always-fail fetch.
   window.fetch = () =>
     Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) });
   window.location.hash = "#overview";
@@ -391,7 +384,8 @@ test("API failure sets the connection pill to offline", async () => {
 });
 
 test("connection pill shows Connected when API is healthy", async () => {
-  const dom = _trackedCreateDom();
+  const dom = createDom();
+  _doms.push(dom);
   const window = dom.window;
   window.fetch = (url) => {
     if (typeof url === "string" && url.includes("/health")) {
@@ -403,6 +397,9 @@ test("connection pill shows Connected when API is healthy", async () => {
     if (typeof url === "string" && url.includes("/metrics/summary")) {
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ cpu: [], memory: [], activity: [], alerts: [] }) });
     }
+    if (typeof url === "string" && url.includes("/alerts") && url.includes("limit=6")) {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ items: [], total: 0 }) });
+    }
     return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
   };
   loadApp(dom);
@@ -410,4 +407,55 @@ test("connection pill shows Connected when API is healthy", async () => {
     const pill = window.document.getElementById("connectionPill");
     return pill && pill.classList.contains("live");
   });
+});
+
+test("overview empty chart shows No historical data", async () => {
+  const { window } = setup({
+    routes: {
+      "/summary": { kpis: { live_hosts: 1, total_hosts: 1, total_running_processes: 5, active_alerts: 0, cpu_percent: 10, memory_percent: 20, samples_received: 10 }, hosts: [] },
+      "/metrics/summary": { cpu: [], memory: [], activity: [], alerts: [] },
+      "/alerts": { items: [], total: 0, limit: 6, offset: 0 },
+    },
+  });
+  await waitFor(() => window.document.getElementById("overviewCpuChart") !== null);
+  // allow lineChart to render empty state
+  await wait(50);
+  const cpuChart = window.document.getElementById("overviewCpuChart");
+  assert.match(cpuChart.textContent, /No historical data/);
+});
+
+test("incident drawer renders strongest treatment on View Incident", async () => {
+  const incidentData = {
+    incident: { id: 1, rule_name: "High CPU", host: "h1", pid: 5, process_name: "p1", create_time: 1.0, metric: "cpu_percent", operator: "gt", threshold: 80, current_value: 95, severity: "critical", status: "active", triggered_at: 100 },
+    process: { host: "h1", pid: 5, process_name: "p1", username: "u", create_time: 1.0, started_time: "Sep 14", state: "running", age_seconds_at_alert: 10 },
+    summary: { metric: "cpu_percent", current_value: 95, previous_value: 30, peak_value: 95, delta: 65, memory_delta_bytes: 10485760, duration_seconds: 10, window_start: 90, window_end: 100, window_seconds: 60, sample_count: 2, is_insufficient: false },
+    timeline: [
+      { timestamp: 90, time: "12:00:00", cpu_percent: 30, memory_percent: 20, memory_rss: 900000, state: "running", is_start: true, label: "Process started" },
+      { timestamp: 100, time: "12:00:10", cpu_percent: 95, memory_percent: 40, memory_rss: 1000000, state: "running", is_alert: true, label: "Alert triggered" },
+    ],
+    evidence: ["Process p1 (PID 5) on h1 breached cpu_percent threshold 80.0%: 95.0% at alert.", "CPU increased sharply (+65.0) before the alert."],
+  };
+  const { window } = setup({
+    routes: {
+      "/alerts": {
+        items: [
+          { id: 1, rule_name: "High CPU", severity: "critical", status: "active", host: "h1", pid: 5, process_name: "p1", create_time: 1.0, metric: "cpu_percent", current_value: 95, threshold: 80, triggered_at: 100 },
+        ],
+        total: 1, limit: 100, offset: 0,
+      },
+      "/incidents/1": incidentData,
+    },
+  });
+  window.location.hash = "#alerts";
+  window.dispatchEvent(new window.HashChangeEvent("hashchange"));
+  await waitFor(() => window.document.querySelector('[data-action="view-incident"]') !== null);
+  window.document.querySelector('[data-action="view-incident"]').click();
+  await waitFor(() => window.document.querySelector(".incident-drawer")?.textContent.includes("Evidence"), { timeout: 3000 });
+  const drawerText = window.document.querySelector(".incident-drawer").textContent;
+  assert.match(drawerText, /Process Incident Analyzer/);
+  assert.match(drawerText, /Evidence/);
+  assert.match(drawerText, /Timeline/);
+  assert.match(drawerText, /Key metrics/);
+  assert.ok(window.document.querySelector(".timeline"), "timeline must be present");
+  assert.ok(window.document.querySelector(".timeline-row.is-alert"), "alert dot should be emphasized");
 });
