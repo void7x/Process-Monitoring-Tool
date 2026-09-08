@@ -52,3 +52,65 @@ def test_summary_processes_and_compatibility_metrics(client):
     metrics = client.get("/metrics", params={"host": "app-01"}).json()
     assert metrics["total"] == 2
     assert client.get("/api/hosts/app-01").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — the "Running Processes" KPI must reflect processes that are
+# actually in the ``running`` state, not every latest process record.
+# ---------------------------------------------------------------------------
+
+
+def _ingest_with_state(client, host, pid, create_time, timestamp, state):
+    payload = sample(pid=pid, create_time=create_time, timestamp=timestamp)
+    payload["state"] = state
+    response = client.post("/ingest", json={"host": host, "samples": [payload]})
+    assert response.status_code == 200
+
+
+def test_running_processes_kpi_counts_only_running_state(client):
+    """``total_running_processes`` is a count of *running* process instances only."""
+    host = "kpi-host"
+    # 2 running + 1 sleeping + 1 stopped.
+    _ingest_with_state(client, host, 1, 1_700_000_000.0, 1_700_000_010.0, "running")
+    _ingest_with_state(client, host, 2, 1_700_000_001.0, 1_700_000_011.0, "running")
+    _ingest_with_state(client, host, 3, 1_700_000_002.0, 1_700_000_012.0, "sleeping")
+    _ingest_with_state(client, host, 4, 1_700_000_003.0, 1_700_000_013.0, "stopped")
+    kpis = client.get("/summary").json()["kpis"]
+    assert kpis["total_running_processes"] == 2
+
+
+def test_running_processes_kpi_includes_only_latest_per_instance(client):
+    """An older sample for the same process instance must not be double-counted."""
+    host = "kpi-host-2"
+    _ingest_with_state(client, host, 1, 1_700_001_000.0, 1_700_001_010.0, "sleeping")
+    _ingest_with_state(client, host, 1, 1_700_001_000.0, 1_700_001_020.0, "running")
+    kpis = client.get("/summary").json()["kpis"]
+    # Only one process instance exists, and its latest sample says
+    # running — so the count is 1, not 2.
+    assert kpis["total_running_processes"] == 1
+
+
+def test_running_processes_kpi_empty_host(client):
+    """An empty host contributes zero to the running-processes KPI."""
+    # No data ingested at all.
+    kpis = client.get("/summary").json()["kpis"]
+    assert kpis["total_running_processes"] == 0
+
+
+def test_running_processes_kpi_excludes_unknown_state(client):
+    """``state='unknown'`` and blank states are not counted as running."""
+    host = "kpi-host-3"
+    _ingest_with_state(client, host, 1, 1_700_002_000.0, 1_700_002_010.0, "unknown")
+    _ingest_with_state(client, host, 2, 1_700_002_001.0, 1_700_002_011.0, "idle")
+    kpis = client.get("/summary").json()["kpis"]
+    assert kpis["total_running_processes"] == 0
+
+
+def test_running_processes_kpi_does_not_count_historical_samples(client):
+    """The KPI is computed from ``latest`` per instance, not from history."""
+    host = "kpi-host-4"
+    # Three running samples, all the same instance.
+    for index in range(3):
+        _ingest_with_state(client, host, 1, 1_700_003_000.0, 1_700_003_010.0 + index, "running")
+    kpis = client.get("/summary").json()["kpis"]
+    assert kpis["total_running_processes"] == 1

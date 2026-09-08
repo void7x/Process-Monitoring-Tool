@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .alerts import AlertEngine
+from .auth import install_auth
 from .config import Settings
 from .db import Database
 from .schemas import HealthResponse, IngestRequest, IngestResponse, RuleCreate, RuleListResponse, RuleResponse, RuleUpdate
@@ -112,8 +113,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_origins=settings.allowed_origins,
         allow_credentials=settings.allowed_origins != ["*"],
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
+        allow_headers=["*", "Authorization", "X-Auth-Token"],
     )
+    install_auth(app, settings)
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:

@@ -24,7 +24,12 @@ def run(settings: AgentSettings | None = None, stop_event: threading.Event | Non
     settings = settings or AgentSettings.from_env()
     stop_event = stop_event or threading.Event()
     sampler = ProcessSampler(settings.hostname)
-    client = CollectorClient(settings.collector_url, settings.request_timeout_seconds, settings.retry_attempts)
+    client = CollectorClient(
+        settings.collector_url,
+        settings.request_timeout_seconds,
+        settings.retry_attempts,
+        settings.auth_token,
+    )
     buffer = LocalBuffer(settings.buffer_file, settings.max_buffer_batches)
     cycle = 0
     logger.info(

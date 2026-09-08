@@ -34,7 +34,13 @@ class ProcessSample(BaseModel):
         return value
     create_time: float = Field(gt=0, le=4_102_444_800)  # through 2100
     timestamp: float = Field(gt=0, le=4_102_444_800)
-    cpu_percent: float = Field(ge=0, le=1_000)
+    # ``cpu_percent`` may be ``None`` on a process's very first sample.  The
+    # agent cannot compute a real delta until it has established a baseline
+    # CPU counter for that exact process instance, and reporting ``0.0`` as a
+    # real reading would silently treat unknown CPU usage as idle.  ``None``
+    # is therefore the explicit "baseline pending" sentinel and is treated as
+    # "unavailable" by alert evaluation.
+    cpu_percent: float | None = Field(default=None, ge=0, le=1_000)
     memory_percent: float = Field(ge=0, le=100)
     memory_rss: int = Field(ge=0, le=2**63 - 1)
     read_bytes: int = Field(ge=0, le=2**63 - 1)
