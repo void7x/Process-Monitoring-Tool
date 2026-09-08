@@ -18,6 +18,7 @@ The API is available at the documented root paths and at `/api/*` aliases. Inter
 | GET | `/alerts`, `/alerts/summary` | Alert center and counts |
 | GET/POST | `/alerts/rules` | List/create rules |
 | GET/PUT/PATCH/DELETE | `/alerts/rules/{rule_id}` | Rule CRUD |
+| GET | `/incidents/{alert_id}` (`/api/incidents/{alert_id}`, `/alerts/{alert_id}/incident`) | Process Incident Analyzer — evidence-based reconstruction for a single alert instance |
 
 ## Authentication
 

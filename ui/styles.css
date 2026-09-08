@@ -452,6 +452,49 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
   .alert-row { grid-template-columns: 88px minmax(150px, 1fr) 34px; gap: 8px; padding: 12px 14px; }
   .alert-row > :nth-child(3), .alert-row > :nth-child(4), .alert-row > :nth-child(5) { display: none; }
 }
+
+/* Incident Analyzer (focused add-on — uses existing design language) */
+.alert-row .button.secondary.small { white-space: nowrap; min-height: 28px; padding: 0 10px; font-size: 10.5px; gap: 5px; }
+.alert-row .button.secondary.small svg { width: 12px; height: 12px; }
+/* Keep alert grid while fitting the incident button — override narrow last column */
+.alert-row { grid-template-columns: 88px minmax(160px, 1.25fr) 102px 102px 132px auto; }
+.alert-row .alert-main { min-width: 0; }
+.incident-drawer { width: min(760px, 100vw); }
+.incident-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
+.incident-card { padding: 0; }
+.incident-card .card-header { padding: 14px 16px 12px; }
+.incident-card .card-body { padding: 14px 16px 16px; }
+.incident-stats { display: grid; gap: 10px; }
+.incident-stat { display: grid; gap: 3px; padding: 10px 12px; background: var(--surface-subtle); border: 1px solid var(--border); border-radius: 9px; }
+.incident-stat label { color: var(--text-muted); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.incident-stat strong { font-size: 13px; font-weight: 850; letter-spacing: -.015em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.incident-stat small { color: var(--text-muted); font-size: 11px; font-weight: 520; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.incident-section { margin-top: 16px; }
+.incident-section:first-child { margin-top: 0; }
+.timeline { position: relative; display: grid; gap: 0; }
+.timeline::before { content: ""; position: absolute; left: 57px; top: 10px; bottom: 10px; width: 2px; background: var(--border); border-radius: 1px; }
+.timeline-row { position: relative; display: grid; grid-template-columns: 56px 14px 1fr; gap: 10px; align-items: start; padding: 10px 0; }
+.timeline-row + .timeline-row { border-top: 1px solid var(--border); }
+.timeline-time { color: var(--text-muted); font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; padding-top: 2px; white-space: nowrap; }
+.timeline-dot { width: 10px; height: 10px; margin-top: 5px; border-radius: 50%; background: var(--surface); border: 2px solid var(--border-strong); box-shadow: 0 0 0 3px var(--surface); position: relative; z-index: 1; }
+.timeline-row.is-alert .timeline-dot { background: var(--red); border-color: var(--red); box-shadow: 0 0 0 3px var(--red-soft); }
+.timeline-row.is-start .timeline-dot { background: var(--primary); border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.timeline-main strong { display: block; font-size: 12.5px; font-weight: 800; letter-spacing: -.01em; }
+.timeline-main small { display: block; margin-top: 3px; color: var(--text-muted); font-size: 11px; line-height: 1.4; font-weight: 520; }
+.evidence-list { margin: 0; padding-left: 18px; display: grid; gap: 8px; color: var(--text-soft); font-size: 12.5px; line-height: 1.55; font-weight: 520; }
+.evidence-list li { padding-left: 2px; }
+.evidence-list li::marker { color: var(--primary); }
+.detail-title p { max-width: 48ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 760px) {
+  .incident-grid { grid-template-columns: 1fr; }
+  .alert-row { grid-template-columns: 76px 1fr auto; gap: 8px; }
+  .alert-row > :nth-child(3), .alert-row > :nth-child(4), .alert-row > :nth-child(5) { display: none; }
+  .incident-drawer { width: 100vw; }
+  .timeline::before { left: 41px; }
+  .timeline-row { grid-template-columns: 40px 14px 1fr; }
+  .timeline-time { font-size: 10px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }

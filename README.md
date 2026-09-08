@@ -13,7 +13,8 @@ Detailed guides live in [`docs/`](docs/index.md): quick start, Windows and Docke
 - **Agent** — Windows/Linux process sampling with `psutil`, graceful shutdown, retry/backoff, a bounded JSONL outage spool, and a pruned per-instance CPU baseline cache that stays bounded even with many short-lived processes.
 - **Collector** — FastAPI service, SQLite WAL persistence, typed request validation, health/readiness endpoints, structured error responses, host freshness, history, rules, alert state, deterministic post-commit webhook/email dispatch, and optional authentication.
 - **Dashboard** — Overview, hosts, process explorer, process-instance detail drawer, alerts, rules CRUD, history, and settings with loading/empty/error/offline states, a professional light theme with clear hierarchy, and built-in auth-token management.
-- **Tests** — API, database identity/idempotency, alert duration/consecutive/cooldown behavior, PID reuse isolation, agent buffering/sampling and CPU-cache pruning, deterministic notification ordering, and frontend auth-header coverage.
+- **Incident Analyzer** — evidence-based reconstruction for a single alert (`host + pid + create_time` in the 60 s window before the alert) with previous/peak/delta/duration calculations, a chronological timeline from actual samples, and deterministic evidence such as “CPU increased sharply” or “Insufficient telemetry” — never fabricates causes and is scoped by instance + timestamp range (see `collector/incidents.py` and `docs/incident-analyzer.md`).
+- **Tests** — API, database identity/idempotency, alert duration/consecutive/cooldown behavior, PID reuse isolation, agent buffering/sampling and CPU-cache pruning, deterministic notification ordering, incident history/PID-reuse/insufficient/fabrication/API/frontend interaction coverage, and frontend auth-header coverage.
 
 ## Important correctness guarantees
 
@@ -173,6 +174,10 @@ Example payload:
 - `POST /alerts/rules`
 - `PUT` or `PATCH /alerts/rules/{rule_id}`
 - `DELETE /alerts/rules/{rule_id}`
+
+### Incident Analyzer
+
+- `GET /incidents/{alert_id}` (also `/api/incidents/{alert_id}` and `/alerts/{alert_id}/incident`) — evidence-based reconstruction for the exact `host + pid + create_time` instance over the 60 s window before the alert (configurable `?window=10..3600`).  Returns `{ incident, process, summary, timeline, evidence, window }` where `summary` includes previous/peak/delta/duration and `timeline` is chronological from real samples; when `summary.is_insufficient` is true the `evidence` reports “Insufficient telemetry” and never fabricates a cause.  Scoped queries use `host + pid + create_time + timestamp BETWEEN window_start AND window_end` via `Database.history`; no full DB scans.  Dashboard: each alert row exposes a “View Incident” affordance that opens a panel/modal with loading/empty/error/real-data states using the existing design language.  See `docs/incident-analyzer.md`.
 
 Rule fields:
 

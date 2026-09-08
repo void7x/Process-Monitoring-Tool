@@ -657,6 +657,10 @@ class Database:
             rows = self._dicts(connection.execute(sql, [*params, limit, offset]).fetchall())
         return rows, total
 
+    def get_alert(self, alert_id: int) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            return self._dict(connection.execute("SELECT * FROM alerts WHERE id=?", (int(alert_id),)).fetchone())
+
     def active_alert_count(self) -> int:
         with self.connect() as connection:
             return int(connection.execute("SELECT COUNT(*) AS count FROM alerts WHERE status='active'").fetchone()["count"])

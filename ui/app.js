@@ -544,8 +544,14 @@
 
   function renderAlertList(alerts, compact) {
     if (!alerts.length) return emptyState("No alerts", "There are no alert events for this host.", "checkcircle", true);
-    if (compact) return `<div>${alerts.map((alert) => `<button class="alert-row alert-${escapeHtml(String(alert.severity || "info").toLowerCase())} ${alert.status === "resolved" ? "alert-resolved" : ""}" style="width:100%;border:0;text-align:left" data-action="process-detail" data-host="${escapeHtml(alert.host)}" data-pid="${alert.pid}" data-create-time="${alert.create_time}"><div>${severityBadge(alert.severity)}<small style="display:block;margin-top:5px;color:var(--text-muted);font-size:9px">${escapeHtml(alert.status)}</small></div><div class="alert-main"><strong>${escapeHtml(alert.rule_name)}</strong><small>${escapeHtml(alert.process_name)} · PID ${number(alert.pid)}</small></div><div class="alert-value">${escapeHtml(metricValue(alert.metric, alert.current_value))}<small>${escapeHtml(metricLabel(alert.metric))}</small></div><div class="alert-value">${escapeHtml(metricValue(alert.metric, alert.threshold))}<small>Threshold</small></div><div class="alert-value">${relativeTime(alert.triggered_at)}<small>${escapeHtml(alert.status)}</small></div><span>${icon("chevron")}</span></button>`).join("")}</div>`;
-    return `<div>${alerts.map((alert) => `<button class="alert-row alert-${escapeHtml(String(alert.severity || "info").toLowerCase())} ${alert.status === "resolved" ? "alert-resolved" : ""}" style="width:100%;border:0;text-align:left" data-action="process-detail" data-host="${escapeHtml(alert.host)}" data-pid="${alert.pid}" data-create-time="${alert.create_time}"><div>${severityBadge(alert.severity)}<small style="display:block;margin-top:5px;color:var(--text-muted);font-size:9px">${escapeHtml(alert.status)}</small></div><div class="alert-main"><strong>${escapeHtml(alert.rule_name)}</strong><small>${escapeHtml(alert.process_name)} · PID ${number(alert.pid)} · ${escapeHtml(alert.host)}</small></div><div class="alert-value">${escapeHtml(metricValue(alert.metric, alert.current_value))}<small>${escapeHtml(metricLabel(alert.metric))}</small></div><div class="alert-value">${escapeHtml(metricValue(alert.metric, alert.threshold))}<small>Threshold</small></div><div class="alert-value">${dateTime(alert.triggered_at)}<small>${alert.resolved_at ? `Resolved ${relativeTime(alert.resolved_at)}` : "Triggered"}</small></div><span>${icon("chevron")}</span></button>`).join("")}</div>`;
+    // Each alert row now includes a dedicated Incident action.  The row itself
+    // remains a process-detail button (existing behavior), while the secondary
+    // View Incident button is a separate control that stops propagation so a
+    // single click does not trigger both actions.  PID reuse remains safe
+    // because the incident endpoint is scoped by host+pid+create_time via the
+    // alert's durable identity.
+    if (compact) return `<div>${alerts.map((alert) => `<div class="alert-row alert-${escapeHtml(String(alert.severity || "info").toLowerCase())} ${alert.status === "resolved" ? "alert-resolved" : ""}" style="cursor:default"><div>${severityBadge(alert.severity)}<small style="display:block;margin-top:5px;color:var(--text-muted);font-size:9px">${escapeHtml(alert.status)}</small></div><button class="alert-main" data-action="process-detail" data-host="${escapeHtml(alert.host)}" data-pid="${alert.pid}" data-create-time="${alert.create_time}" style="flex:1;border:0;background:transparent;text-align:left;padding:0"><strong>${escapeHtml(alert.rule_name)}</strong><small>${escapeHtml(alert.process_name)} · PID ${number(alert.pid)}</small></button><div class="alert-value">${escapeHtml(metricValue(alert.metric, alert.current_value))}<small>${escapeHtml(metricLabel(alert.metric))}</small></div><div class="alert-value">${escapeHtml(metricValue(alert.metric, alert.threshold))}<small>Threshold</small></div><div class="alert-value">${relativeTime(alert.triggered_at)}<small>${escapeHtml(alert.status)}</small></div><button class="button secondary small" data-action="view-incident" data-alert-id="${alert.id}" type="button" title="Analyze incident for this alert" aria-label="View incident for ${escapeHtml(alert.rule_name)}">${icon("activity")} View Incident</button></div>`).join("")}</div>`;
+    return `<div>${alerts.map((alert) => `<div class="alert-row alert-${escapeHtml(String(alert.severity || "info").toLowerCase())} ${alert.status === "resolved" ? "alert-resolved" : ""}" style="cursor:default"><div>${severityBadge(alert.severity)}<small style="display:block;margin-top:5px;color:var(--text-muted);font-size:9px">${escapeHtml(alert.status)}</small></div><button class="alert-main" data-action="process-detail" data-host="${escapeHtml(alert.host)}" data-pid="${alert.pid}" data-create-time="${alert.create_time}" style="flex:1;border:0;background:transparent;text-align:left;padding:0"><strong>${escapeHtml(alert.rule_name)}</strong><small>${escapeHtml(alert.process_name)} · PID ${number(alert.pid)} · ${escapeHtml(alert.host)}</small></button><div class="alert-value">${escapeHtml(metricValue(alert.metric, alert.current_value))}<small>${escapeHtml(metricLabel(alert.metric))}</small></div><div class="alert-value">${escapeHtml(metricValue(alert.metric, alert.threshold))}<small>Threshold</small></div><div class="alert-value">${dateTime(alert.triggered_at)}<small>${alert.resolved_at ? `Resolved ${relativeTime(alert.resolved_at)}` : "Triggered"}</small></div><button class="button secondary small" data-action="view-incident" data-alert-id="${alert.id}" type="button" title="Analyze incident for this alert" aria-label="View incident for ${escapeHtml(alert.rule_name)}">${icon("activity")} View Incident</button></div>`).join("")}</div>`;
   }
 
   function bindAlertFilters() {
@@ -764,6 +770,74 @@
     }
   }
 
+  async function openIncident(alertId) {
+    const id = String(alertId || "").trim();
+    if (!id) { showToast("Incident not available", "Missing alert identifier.", "error"); return; }
+    drawerRoot.innerHTML = `<div class="drawer-backdrop" data-action="close-drawer"></div><aside class="drawer incident-drawer" role="dialog" aria-modal="true" aria-label="Incident analysis"><div class="drawer-header"><div class="detail-title"><span class="detail-icon">${icon("activity")}</span><div><h2>Process Incident Analyzer</h2><p>Incident #${escapeHtml(id)} · evidence-based reconstruction</p></div></div><button class="close-button" type="button" data-action="close-drawer" aria-label="Close incident">×</button></div><div class="drawer-content"><div class="loading-center"><span class="spinner"></span>Analyzing incident…</div><p class="field-help" style="margin-top:10px;text-align:center">Inspecting recent telemetry for this exact process instance (host + PID + create_time) in the 60 s window before the alert.</p></div></aside>`;
+    try {
+      const data = await apiFetch(`/incidents/${encodeURIComponent(id)}`);
+      const content = drawerRoot.querySelector(".drawer-content");
+      if (!content) return;
+      const inc = data.incident || {};
+      const summary = data.summary || {};
+      const timeline = data.timeline || [];
+      const evidence = data.evidence || [];
+      const proc = data.process || {};
+      // Process info
+      const pid = escapeHtml(String(inc.pid ?? proc.pid ?? ""));
+      const host = escapeHtml(String(inc.host ?? proc.host ?? ""));
+      const pname = escapeHtml(String(inc.process_name ?? proc.process_name ?? "Unknown"));
+      const started = proc.started_time || _fmtTimeBadge(proc.create_time || inc.create_time);
+      const triggered = inc.triggered_at ? fullDateTime(inc.triggered_at) : "—";
+      const metric = escapeHtml(String(inc.metric || summary.metric || "cpu_percent"));
+      const threshold = inc.threshold != null ? escapeHtml(metricValue(inc.metric, inc.threshold)) : "—";
+      const currentVal = summary.current_value != null ? escapeHtml(metricValue(inc.metric, summary.current_value)) : (inc.current_value != null ? escapeHtml(metricValue(inc.metric, inc.current_value)) : "—");
+      const previousVal = summary.previous_value != null ? escapeHtml(metricValue(inc.metric, summary.previous_value)) : "—";
+      const peakVal = summary.peak_value != null ? escapeHtml(metricValue(inc.metric, summary.peak_value)) : "—";
+      const delta = summary.delta != null ? `${summary.delta > 0 ? "+" : ""}${summary.delta.toFixed(1)}` : "—";
+      const memDelta = summary.memory_delta_bytes != null ? `${(summary.memory_delta_bytes / (1024*1024)).toFixed(1)} MB` : "—";
+      const duration = summary.duration_seconds != null ? `${Math.round(summary.duration_seconds)}s` : "—";
+      const isInsufficient = summary.is_insufficient;
+      function _fmtTimeBadge(ts) { try { return ts ? new Date(Number(ts)*1000).toLocaleString([], { month:"short", day:"numeric", hour:"2-digit", minute:"2-digit", second:"2-digit" }) : "—"; } catch (_) { return "—"; } }
+      function _evidenceList(list) {
+        if (!list || !list.length) return `<p class="field-help">No evidence was generated for this incident.</p>`;
+        return `<ul class="evidence-list">${list.map((e) => `<li>${escapeHtml(e)}</li>`).join("")}</ul>`;
+      }
+      function _timelineHtml(items) {
+        if (!items || !items.length) return `<div class="empty-state"><div><div class="empty-icon">${icon("clock")}</div><strong>No timeline available</strong><p>Not enough historical telemetry is available to reconstruct this incident.</p></div></div>`;
+        // Timeline is already ordered ascending
+        return `<div class="timeline">${items.map((t) => {
+          const isAlert = t.is_alert;
+          const isStart = t.is_start;
+          const label = escapeHtml(t.label || "");
+          const cpu = t.cpu_percent != null ? `${Number(t.cpu_percent).toFixed(1)}%` : "—";
+          const mem = t.memory_rss != null ? bytes(t.memory_rss) : (t.memory_percent != null ? percent(t.memory_percent) : "—");
+          const state = t.state ? escapeHtml(String(t.state)) : "";
+          const timeStr = escapeHtml(String(t.time || _fmtTimeBadge(t.timestamp)));
+          return `<div class="timeline-row ${isAlert ? "is-alert" : ""} ${isStart ? "is-start" : ""}"><span class="timeline-time">${timeStr}</span><span class="timeline-dot"></span><div class="timeline-main"><strong>${label || (isAlert ? "Alert triggered" : isStart ? "Process started" : `CPU ${cpu} · ${mem}`)}</strong><small>${isAlert ? `Alert #${escapeHtml(String(inc.id))} · ${escapeHtml(String(inc.rule_name || ""))} · ${metric} ${escapeHtml(String(inc.operator || ""))} ${threshold}` : isStart ? `PID ${pid} on ${host} · started ${started}` : `${metric} ${cpu} · Memory ${mem} ${state ? `· ${state}` : ""}`}</small></div></div>`;
+        }).join("")}</div>`;
+      }
+      if (isInsufficient) {
+        content.innerHTML = `<div class="incident-section"><div class="card" style="padding:16px"><h3 style="margin:0 0 6px;font-size:13px">Process: ${pname}</h3><p class="field-help" style="margin:0">PID ${pid} · Host ${host} · Started ${started} · Rule ${escapeHtml(String(inc.rule_name || inc.rule_id || ""))}</p></div></div>
+          <div class="incident-section"><div class="card" style="padding:16px"><h3 style="margin:0 0 10px;font-size:13px;display:flex;align-items:center;gap:8px">${icon("info")} Insufficient telemetry</h3><p class="field-help">Not enough historical telemetry is available to reconstruct this incident.</p><p class="field-help" style="margin-top:8px">Only ${summary.sample_count || 0} sample(s) were found in the ${summary.window_seconds || 60}s window before the alert. The process may have just started or the history may have been pruned.</p><div style="margin-top:12px;display:flex;gap:8px"><span class="status-badge neutral">Samples: ${summary.sample_count || 0}</span><span class="status-badge info">Window: ${summary.window_seconds || 60}s</span></div><div style="margin-top:14px">${_timelineHtml(timeline)}</div></div></div>
+          <div class="incident-section"><div class="card" style="padding:16px"><h3 style="margin:0 0 10px;font-size:13px">Evidence</h3>${_evidenceList(evidence)}</div></div>`;
+      } else {
+        content.innerHTML = `<div class="incident-grid">
+          <section class="card incident-card"><div class="card-header"><div><h3 class="card-title">Process</h3><p class="card-subtitle">Exact instance identity</p></div>${statusBadge(proc.state || "running", proc.state || "running")}</div><div class="card-body incident-stats"><div class="incident-stat"><label>Process</label><strong title="${pname}">${pname}</strong><small>PID ${pid} · ${host}</small></div><div class="incident-stat"><label>Started</label><strong>${escapeHtml(started)}</strong><small>create_time ${proc.create_time ? Number(proc.create_time).toFixed(1) : "—"}</small></div><div class="incident-stat"><label>Age at alert</label><strong>${proc.age_seconds_at_alert != null ? `${Math.round(proc.age_seconds_at_alert)}s` : "—"}</strong><small>triggered ${triggered}</small></div></div></section>
+          <section class="card incident-card"><div class="card-header"><div><h3 class="card-title">Incident</h3><p class="card-subtitle">${escapeHtml(String(inc.rule_name || inc.rule_id || "Alert"))} · ${escapeHtml(String(inc.severity || ""))}</p></div>${severityBadge(inc.severity)}</div><div class="card-body incident-stats"><div class="incident-stat"><label>Metric</label><strong>${_metricLabel(inc.metric)}</strong><small>${escapeHtml(String(inc.operator || ""))} ${threshold}</small></div><div class="incident-stat"><label>Current</label><strong>${currentVal}</strong><small>at alert</small></div><div class="incident-stat"><label>Previous</label><strong>${previousVal}</strong><small>change ${delta}</small></div></div></section>
+        </div>
+        <div class="incident-section"><div class="card"><div class="card-header"><div><h3 class="card-title">Key metrics</h3><p class="card-subtitle">Deterministic calculations from the ${summary.window_seconds || 60}s window before the alert</p></div><span class="status-badge info">${summary.sample_count} samples</span></div><div class="card-body"><div class="detail-metrics" style="grid-template-columns:repeat(4,1fr)"><div class="detail-metric"><label>Previous</label><strong>${previousVal}</strong><small>sample before alert</small></div><div class="detail-metric"><label>Current</label><strong>${currentVal}</strong><small>at alert</small></div><div class="detail-metric"><label>Peak</label><strong>${peakVal}</strong><small>window peak</small></div><div class="detail-metric"><label>Above threshold</label><strong>${duration}</strong><small>duration</small></div></div><div class="identity-list" style="margin-top:14px"><div class="identity-row"><span>CPU delta</span><span>${delta}</span></div><div class="identity-row"><span>Memory change</span><span>${memDelta}</span></div><div class="identity-row"><span>Process state</span><span>${escapeHtml(String((data.timeline && data.timeline.slice(-1)[0] && data.timeline.slice(-1)[0].state) || proc.state || "running"))}</span></div><div class="identity-row"><span>Window</span><span>${_fmtTimeBadge(summary.window_start)} → ${_fmtTimeBadge(summary.window_end)} (${summary.window_seconds || 60}s)</span></div></div></div></div></div>
+        <div class="incident-section"><div class="card"><div class="card-header"><div><h3 class="card-title">Timeline</h3><p class="card-subtitle">Actual samples for this exact process instance, ordered chronologically</p></div><span class="status-badge neutral">${timeline.length} events</span></div><div class="card-body">${_timelineHtml(timeline)}</div></div></div>
+        <div class="incident-section"><div class="card"><div class="card-header"><div><h3 class="card-title">Evidence</h3><p class="card-subtitle">Observations generated deterministically from telemetry — no fabricated causes</p></div><span class="status-badge warning">Evidence-based</span></div><div class="card-body">${_evidenceList(evidence)}<p class="field-help" style="margin-top:12px">When evidence is insufficient, the analyzer reports “Insufficient telemetry to determine the cause.” It will never claim malware, user actions, or other unobserved causes.</p></div></div></div>`;
+      }
+      // Helper inside content for metric label
+      function _metricLabel(m) { const map = { cpu_percent: "CPU", memory_percent: "Memory", memory_rss: "Memory RSS", read_bytes: "Read I/O", write_bytes: "Write I/O" }; return map[m] || m; }
+    } catch (error) {
+      const contentErr = drawerRoot.querySelector(".drawer-content");
+      if (contentErr) contentErr.innerHTML = `<div class="error-state"><span>${icon("alert")}</span><div><strong>Incident analysis could not be loaded</strong><p>${escapeHtml(error.message || "The collector returned an unexpected response.")} <button class="link-button" data-action="view-incident" data-alert-id="${escapeHtml(id)}" type="button">Retry</button></p><p class="field-help" style="margin-top:8px">Ensure the alert still exists and the collector is reachable. The analysis requires historical telemetry for the exact process instance (host + PID + create_time).</p></div></div>`;
+    }
+  }
+
   async function openProcessDetail(host, pid, createTime) {
     drawerRoot.innerHTML = `<div class="drawer-backdrop" data-action="close-drawer"></div><aside class="drawer" role="dialog" aria-modal="true" aria-label="Process detail"><div class="drawer-header"><div class="detail-title"><span class="detail-icon">${icon("process")}</span><div><h2>Process detail</h2><p>${escapeHtml(host)} · PID ${escapeHtml(pid)}</p></div></div><button class="close-button" type="button" data-action="close-drawer" aria-label="Close process detail">×</button></div><div class="drawer-content"><div class="loading-center"><span class="spinner"></span>Loading exact process instance…</div></div></aside>`;
     try {
@@ -891,8 +965,9 @@
     const actionNode = event.target.closest("[data-action]");
     if (!actionNode) return;
     const action = actionNode.dataset.action;
-    if (["close-drawer", "process-detail", "host-detail", "search-host", "search-process", "search-alert"].includes(action)) event.stopPropagation();
+    if (["close-drawer", "process-detail", "host-detail", "search-host", "search-process", "search-alert", "view-incident"].includes(action)) event.stopPropagation();
     if (action === "close-drawer") { drawerRoot.innerHTML = ""; return; }
+    if (action === "view-incident") { const incidentId = actionNode.dataset.alertId || actionNode.getAttribute("data-alert-id"); if (incidentId) { openIncident(incidentId); event.preventDefault(); } return; }
     if (action === "process-detail" || action === "search-process" || action === "search-alert") { openProcessDetail(actionNode.dataset.host, actionNode.dataset.pid, actionNode.dataset.createTime); document.getElementById("globalSearchResults").hidden = true; return; }
     if (action === "host-detail" || action === "search-host") { window.location.hash = `#host/${encodeURIComponent(actionNode.dataset.host)}`; document.getElementById("globalSearchResults").hidden = true; return; }
     if (action === "jump-processes") { window.location.hash = "#processes"; return; }
