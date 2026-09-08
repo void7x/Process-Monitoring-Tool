@@ -33,6 +33,7 @@ class AgentSettings:
     max_buffer_batches: int = _int("AGENT_MAX_BUFFER_BATCHES", 200, 1, 10_000)
     request_timeout_seconds: float = _float("AGENT_REQUEST_TIMEOUT_SECONDS", 5, 1, 60)
     retry_attempts: int = _int("AGENT_RETRY_ATTEMPTS", 3, 1, 8)
+    auth_token: str = os.getenv("AUTH_TOKEN", os.getenv("AGENT_AUTH_TOKEN", ""))
 
     @classmethod
     def from_env(cls) -> "AgentSettings":
@@ -45,4 +46,5 @@ class AgentSettings:
             max_buffer_batches=_int("AGENT_MAX_BUFFER_BATCHES", 200, 1, 10_000),
             request_timeout_seconds=_float("AGENT_REQUEST_TIMEOUT_SECONDS", 5, 1, 60),
             retry_attempts=_int("AGENT_RETRY_ATTEMPTS", 3, 1, 8),
+            auth_token=os.getenv("AUTH_TOKEN", os.getenv("AGENT_AUTH_TOKEN", "")),
         )

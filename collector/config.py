@@ -39,12 +39,25 @@ class Settings:
     max_request_bytes: int = _int_env("MAX_REQUEST_BYTES", 5_000_000, 100_000, 50_000_000)
     retention_days: int = _int_env("RETENTION_DAYS", 30, 1, 3_650)
     cors_origins: str = os.getenv("CORS_ORIGINS", "*")
+    auth_token: str = os.getenv("AUTH_TOKEN", "")
+    auth_protect_docs: bool = os.getenv("AUTH_PROTECT_DOCS", "false").lower() in {"1", "true", "yes", "on"}
     webhook_url: str = os.getenv("ALERT_WEBHOOK_URL", "")
+    webhook_timeout_seconds: float = _float_env("ALERT_WEBHOOK_TIMEOUT_SECONDS", 5, 1, 30)
     smtp_host: str = os.getenv("SMTP_HOST", "")
     smtp_port: int = _int_env("SMTP_PORT", 587, 1, 65_535)
+    smtp_username: str = os.getenv("SMTP_USERNAME", "")
+    smtp_password: str = os.getenv("SMTP_PASSWORD", "")
     smtp_from: str = os.getenv("SMTP_FROM", "process-monitor@localhost")
     smtp_to: str = os.getenv("SMTP_TO", "")
+    smtp_use_tls: bool = os.getenv("SMTP_USE_TLS", "true").lower() in {"1", "true", "yes", "on"}
+    smtp_use_ssl: bool = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes", "on"}
+    smtp_timeout_seconds: float = _float_env("SMTP_TIMEOUT_SECONDS", 10, 1, 60)
     version: str = os.getenv("APP_VERSION", "1.0.0")
+
+    @property
+    def auth_enabled(self) -> bool:
+        """Authentication is enabled only when a non-empty token is configured."""
+        return bool(self.auth_token and self.auth_token.strip())
 
     def ensure_directories(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,10 +80,18 @@ class Settings:
             max_request_bytes=_int_env("MAX_REQUEST_BYTES", 5_000_000, 100_000, 50_000_000),
             retention_days=_int_env("RETENTION_DAYS", 30, 1, 3_650),
             cors_origins=os.getenv("CORS_ORIGINS", "*"),
+            auth_token=os.getenv("AUTH_TOKEN", ""),
+            auth_protect_docs=os.getenv("AUTH_PROTECT_DOCS", "false").lower() in {"1", "true", "yes", "on"},
             webhook_url=os.getenv("ALERT_WEBHOOK_URL", ""),
+            webhook_timeout_seconds=_float_env("ALERT_WEBHOOK_TIMEOUT_SECONDS", 5, 1, 30),
             smtp_host=os.getenv("SMTP_HOST", ""),
             smtp_port=_int_env("SMTP_PORT", 587, 1, 65_535),
+            smtp_username=os.getenv("SMTP_USERNAME", ""),
+            smtp_password=os.getenv("SMTP_PASSWORD", ""),
             smtp_from=os.getenv("SMTP_FROM", "process-monitor@localhost"),
             smtp_to=os.getenv("SMTP_TO", ""),
+            smtp_use_tls=os.getenv("SMTP_USE_TLS", "true").lower() in {"1", "true", "yes", "on"},
+            smtp_use_ssl=os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes", "on"},
+            smtp_timeout_seconds=_float_env("SMTP_TIMEOUT_SECONDS", 10, 1, 60),
             version=os.getenv("APP_VERSION", "1.0.0"),
         )

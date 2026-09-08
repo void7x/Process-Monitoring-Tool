@@ -27,6 +27,26 @@ host + pid + create_time + timestamp
 
 Historical samples are retained independently of host freshness. A host can become stale or offline without deleting its process history.
 
+### First-sample CPU behavior
+
+`psutil.Process.cpu_percent(interval=None)` is a *delta* measurement: the
+first call after a process appears has no previous baseline and would
+otherwise return `0.0`.  The agent therefore emits `cpu_percent: null`
+on the first sample of every `host + pid + create_time` instance and a
+real percentage on every subsequent sample.  The collector stores
+`NULL` for that field, and the alert engine skips CPU-based rules
+when the reading is unavailable.  This avoids creating or resolving an
+alert based on a phantom "idle" reading for a brand-new process.
+
+### Running Processes KPI
+
+The `total_running_processes` KPI in `/summary` is the count of
+*latest* process instances whose `state` field is exactly `running`.
+A process that is `sleeping`, `stopped`, `idle`, or whose state is
+unknown is **not** counted as running, even if a sample was received
+recently.  This is the operational definition of "running" and is
+the value the dashboard reports.
+
 ## Quick start: local development
 
 Python 3.11+ is recommended.
@@ -57,6 +77,8 @@ Run checks:
 ```bash
 python -m compileall -q collector agent tests
 python -m pytest -q
+node --check ui/app.js
+node --test ui/tests/*.test.js   # frontend tests
 ```
 
 ## Docker Compose
@@ -171,6 +193,18 @@ Alert state is persisted and keyed by `rule_id + host + pid + create_time`. Acti
 | `MAX_REQUEST_BYTES` | `5000000` | Request size guard |
 | `RETENTION_DAYS` | `30` | Sample cleanup horizon for operators that call pruning |
 | `CORS_ORIGINS` | `*` | Comma-separated allowed dashboard origins |
+| `AUTH_TOKEN` | *(empty)* | Optional bearer token. When set, the agent and dashboard must present `Authorization: Bearer <token>` (or `X-Auth-Token`) for every non-health request. |
+| `AUTH_PROTECT_DOCS` | `false` | When `true`, `/docs` and `/openapi.json` also require the token. |
+| `ALERT_WEBHOOK_URL` | *(empty)* | Optional webhook endpoint for `action: webhook` rules. |
+| `ALERT_WEBHOOK_TIMEOUT_SECONDS` | `5` | Webhook request timeout. |
+| `SMTP_HOST` | *(empty)* | Optional SMTP host for `action: email` rules. |
+| `SMTP_PORT` | `587` | SMTP port. Use 465 with `SMTP_USE_SSL=true` for implicit TLS. |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | *(empty)* | Optional SMTP credentials. |
+| `SMTP_USE_TLS` | `true` | Send `STARTTLS` after connecting. |
+| `SMTP_USE_SSL` | `false` | Use `SMTP_SSL` (implicit TLS) instead of plain `SMTP`. |
+| `SMTP_TIMEOUT_SECONDS` | `10` | SMTP connection timeout. |
+| `SMTP_FROM` | `process-monitor@localhost` | Envelope From address. |
+| `SMTP_TO` | *(empty)* | Envelope To address. |
 | `COLLECTOR_URL` | `http://127.0.0.1:8000` | Agent ingestion endpoint base |
 | `SAMPLE_INTERVAL_SECONDS` | `5` | Agent sampling interval |
 | `AGENT_BATCH_SIZE` | `100` | Agent batch size |
