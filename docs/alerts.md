@@ -48,6 +48,20 @@ logged with the alert ID and never include credentials.  The sample
 and the alert state remain committed regardless of the notification
 outcome.
 
+## Deterministic post-commit dispatch (second-pass)
+
+`POST /ingest` buffers all newly triggered alerts during the atomic
+`BEGIN IMMEDIATE` evaluation phase (`notify=False`), commits the
+transaction, and only then dispatches the collected alerts once via
+`AlertEngine.dispatch_triggered_batch`.  The dispatcher sorts the batch
+by `(triggered_at, rule_id, host, pid, create_time, id)` so a burst
+that triggers several rules on several samples always produces the same
+observable delivery order, even when many workers race on the same
+`host + pid + create_time` instance.  Each alert is still sent on its
+own daemon thread so a slow webhook or mail server never blocks the
+HTTP response.  Tests assert the sorted order and that `notify=False`
+does not double-dispatch.
+
 ## SMTP configuration
 
 The collector honors these environment variables:

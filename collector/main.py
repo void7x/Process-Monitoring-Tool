@@ -165,15 +165,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=413,
             )
         result = db.insert_samples(payload.host, [sample.model_dump() for sample in payload.samples])
-        newly_triggered = []
+        newly_triggered: list[dict[str, Any]] = []
         for sample in result["inserted"]:
             try:
-                newly_triggered.extend(engine.evaluate_sample(sample))
+                # ``notify=False`` defers notification until after the batch
+                # has been committed.  This makes the ingestion transaction
+                # small and allows the dispatcher to emit alerts in a
+                # deterministic, sorted order once durability is guaranteed.
+                newly_triggered.extend(engine.evaluate_sample(sample, notify=False))
             except Exception:
                 # The sample is durable even if a malformed legacy rule or an
                 # optional dispatcher has a problem. Log the incident and keep
                 # the agent's ingestion contract reliable.
                 logger.exception("Alert evaluation failed", extra={"host": payload.host, "pid": sample.get("pid")})
+        # Post-commit, deterministic dispatch.  All alert state has been
+        # committed via ``evaluate_alert_atomic``; notifications now run in a
+        # stable sorted order (triggered_at, rule_id, host, pid,
+        # create_time) so concurrent batches produce the same observable
+        # delivery sequence and retries never cause duplicate commits.
+        if newly_triggered:
+            try:
+                engine.dispatch_triggered_batch(newly_triggered)
+            except Exception:
+                logger.exception("Post-commit alert dispatch failed", extra={"count": len(newly_triggered)})
         logger.info(
             "Samples ingested",
             extra={"host": payload.host, "accepted": result["accepted"], "duplicates": result["duplicates"]},

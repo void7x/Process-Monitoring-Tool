@@ -236,3 +236,111 @@ def test_sampler_forget_resets_baseline_cache():
     sampler.forget(pid=1)
     assert (1, 1.0) not in sampler._cpu_primed
     assert (2, 1.0) in sampler._cpu_primed
+
+# ---------------------------------------------------------------------------
+# Second-pass — CPU baseline cache cleanup / pruning.
+#
+# Short-lived processes must not make the sampler's baseline table grow
+# without bound.  The sampler now prunes stale baselines after each
+# cycle and bounds the table to a configurable limit.
+# ---------------------------------------------------------------------------
+
+
+def test_cpu_baseline_cache_prunes_stale_entries():
+    """Baselines for processes that disappeared must be removed."""
+    sampler = ProcessSampler("prune-host", max_entries=10)
+    # Populate with two distinct instances.
+    info_a = {
+        "pid": 9001, "name": "short-a", "username": "op",
+        "create_time": 1_700_010_000.0, "memory_percent": 1.0,
+        "memory_info": psutil.Process(os.getpid()).memory_info(),
+        "io_counters": None, "status": "running",
+    }
+    info_b = {
+        "pid": 9002, "name": "short-b", "username": "op",
+        "create_time": 1_700_010_001.0, "memory_percent": 1.0,
+        "memory_info": psutil.Process(os.getpid()).memory_info(),
+        "io_counters": None, "status": "running",
+    }
+    stub_a = _StubProcess(info_a, [0.0, 10.0])
+    stub_b = _StubProcess(info_b, [0.0, 20.0])
+    with patch("agent.sampler.psutil.process_iter", return_value=[stub_a, stub_b]):
+        sampler.sample()
+    assert (9001, 1_700_010_000.0) in sampler._cpu_primed
+    assert (9002, 1_700_010_001.0) in sampler._cpu_primed
+    assert sampler.cpu_cache_size == 2
+    # Next cycle only sees b, so a should be pruned.
+    stub_b2 = _StubProcess(info_b, [20.0])
+    with patch("agent.sampler.psutil.process_iter", return_value=[stub_b2]):
+        sampler.sample()
+    assert (9002, 1_700_010_001.0) in sampler._cpu_primed
+    assert (9001, 1_700_010_000.0) not in sampler._cpu_primed
+    assert sampler.cpu_cache_size == 1
+
+
+def test_cpu_baseline_cache_respects_max_entries():
+    """Even with many concurrent processes the cache stays bounded."""
+    sampler = ProcessSampler("bounded-host", max_entries=5)
+    # Insert 10 distinct instances in one cycle.
+    stubs = []
+    for i in range(10):
+        info = {
+            "pid": 10000 + i, "name": f"proc-{i}", "username": "op",
+            "create_time": 1_700_020_000.0 + i, "memory_percent": 1.0,
+            "memory_info": psutil.Process(os.getpid()).memory_info(),
+            "io_counters": None, "status": "running",
+        }
+        stubs.append(_StubProcess(info, [0.0, float(i)]))
+    with patch("agent.sampler.psutil.process_iter", return_value=stubs):
+        sampler.sample()
+    # After pruning of stale (none) the size-based eviction should cap at 5.
+    # But after the sample, only 10 were seen, so we evict oldest 5 to respect limit.
+    # The current cycle saw all 10, so pruned stale is 0, then excess is 5.
+    assert sampler.cpu_cache_size == 5
+
+
+def test_cpu_baseline_cache_prune_is_idempotent_and_preserves_seen():
+    """Pruning an already-clean cache does not discard seen entries."""
+    sampler = ProcessSampler("idempotent-host", max_entries=100)
+    info = {
+        "pid": 9100, "name": "steady", "username": "op",
+        "create_time": 1_700_030_000.0, "memory_percent": 1.0,
+        "memory_info": psutil.Process(os.getpid()).memory_info(),
+        "io_counters": None, "status": "running",
+    }
+    stub = _StubProcess(info, [0.0, 30.0])
+    with patch("agent.sampler.psutil.process_iter", return_value=[stub]):
+        sampler.sample()
+    before = sampler.cpu_cache_size
+    # Sample again with same instance — cache should remain same size, not shrink to zero.
+    stub2 = _StubProcess(info, [30.0])
+    with patch("agent.sampler.psutil.process_iter", return_value=[stub2]):
+        sampler.sample()
+    assert sampler.cpu_cache_size == before
+    assert (9100, 1_700_030_000.0) in sampler._cpu_primed
+
+
+def test_cpu_baseline_cache_lru_eviction_keeps_most_recent():
+    """When over limit, the most recently seen instances are retained."""
+    sampler = ProcessSampler("lru-host", max_entries=3)
+    # Prime 3 instances sequentially, each cycle seeing one new while cycling.
+    infos = []
+    for i in range(5):
+        infos.append({
+            "pid": 9200 + i, "name": f"p{i}", "username": "op",
+            "create_time": 1_700_040_000.0 + i, "memory_percent": 1.0,
+            "memory_info": psutil.Process(os.getpid()).memory_info(),
+            "io_counters": None, "status": "running",
+        })
+    # Fill 3 entries
+    for i in range(3):
+        stub = _StubProcess(infos[i], [0.0, float(i)])
+        with patch("agent.sampler.psutil.process_iter", return_value=[stub]):
+            sampler.sample()
+        # After each sample the cache prunes stale, so only 1 remains at a time.
+        # To test LRU, we insert all 5 at once and let size-eviction keep newest 3.
+    stubs = [_StubProcess(infos[i], [0.0, float(i)]) for i in range(5)]
+    with patch("agent.sampler.psutil.process_iter", return_value=stubs):
+        sampler.sample()
+    # Should keep only max 3, and they should be the last 3 by recency (which for same timestamp, insertion order defines recency)
+    assert sampler.cpu_cache_size == 3

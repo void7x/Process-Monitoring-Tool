@@ -5,8 +5,21 @@ const assert = require("node:assert/strict");
 
 const { createDom, loadApp, makeFetchMock, wait, waitFor } = require("./dom");
 
+// Track windows so we can clean up intervals after each test and avoid hanging
+// when multiple test files are run together via `node --test ui/tests/*.test.js`.
+const _openWindows = new Set();
+const _origCreateDom = createDom;
+function _trackedCreateDom(...args) {
+  const dom = _origCreateDom(...args);
+  _openWindows.add(dom);
+  return dom;
+}
+// Monkey-patch the helper used by tests via closure - expose tracked version
+// Tests that use `createDom` directly will now be tracked; we also patch `setup`.
+
+
 function setup({ routes }) {
-  const dom = createDom();
+  const dom = _trackedCreateDom();
   const window = dom.window;
   // Install a controllable fetch mock.
   window.fetch = makeFetchMock(routes);
@@ -16,8 +29,25 @@ function setup({ routes }) {
   return { dom, window, app };
 }
 
+// Ensure JSDOM windows are closed after each test to clear intervals
+const { afterEach } = require("node:test");
+afterEach(() => {
+  for (const dom of Array.from(_openWindows)) {
+    try {
+      const win = dom.window;
+      if (win && win.__processMonitor && win.__processMonitor.cleanup) win.__processMonitor.cleanup();
+    } catch (_) {}
+    // Do not close the window immediately - async test callbacks may still
+    // reference the document.  Clearing intervals is sufficient to let the
+    // Node event loop exit.  The JSDOM window will be GC'd after the test.
+    // Intentionally keep the dom in the set until next test's cleanup to
+    // avoid double-close errors - but we still remove it to prevent leak.
+    _openWindows.delete(dom);
+  }
+});
+
 test("app.js loads without throwing", () => {
-  const dom = createDom();
+  const dom = _trackedCreateDom();
   const window = dom.window;
   window.fetch = makeFetchMock({
     "/summary": { kpis: {}, hosts: [] },
@@ -197,7 +227,7 @@ test("rules page lists alert rules", async () => {
 
 test("rule form submit POSTs to /alerts/rules", async () => {
   const posts = [];
-  const dom = createDom();
+  const dom = _trackedCreateDom();
   const window = dom.window;
   const calls = [];
   window.fetch = (url, init) => {
@@ -347,7 +377,7 @@ test("history page renders retained samples", async () => {
 });
 
 test("API failure sets the connection pill to offline", async () => {
-  const dom = createDom();
+  const dom = _trackedCreateDom();
   const window = dom.window;
   // Always-fail fetch.
   window.fetch = () =>
@@ -361,7 +391,7 @@ test("API failure sets the connection pill to offline", async () => {
 });
 
 test("connection pill shows Connected when API is healthy", async () => {
-  const dom = createDom();
+  const dom = _trackedCreateDom();
   const window = dom.window;
   window.fetch = (url) => {
     if (typeof url === "string" && url.includes("/health")) {

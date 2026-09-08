@@ -565,3 +565,129 @@ def test_evaluate_alert_atomic_skips_out_of_order_samples(tmp_path):
     # active alert still present
     active = db.list_alerts(status="active")
     assert len(active[0]) == 1
+
+# ---------------------------------------------------------------------------
+# Second-pass — deterministic post-commit notification dispatch.
+#
+# Batch ingestion must commit alert state first and then emit
+# notifications in a reproducible sorted order.  The tests prove
+# that sorting is stable, that ``notify=False`` defers dispatch,
+# and that the ingest path uses the post-commit hook.
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_batch_is_deterministic_and_sorted():
+    """``dispatch_batch`` must emit alerts in triggered_at / rule_id order."""
+    from collector.alerts import NotificationDispatcher
+    from collector.config import Settings
+
+    settings = Settings(webhook_url="http://example.invalid/hook", webhook_timeout_seconds=1.0)
+    dispatcher = NotificationDispatcher(settings)
+    emitted: list[int] = []
+
+    def fake_send(url, alert, timeout):
+        emitted.append(alert["id"])
+
+    dispatcher._send_webhook = fake_send  # type: ignore[assignment]
+    # Alerts intentionally out of order.
+    alerts = [
+        {"id": 3, "rule_id": "b-rule", "host": "h", "pid": 1, "create_time": 1.0, "triggered_at": 300.0, "action": "webhook"},
+        {"id": 1, "rule_id": "a-rule", "host": "h", "pid": 2, "create_time": 1.0, "triggered_at": 100.0, "action": "webhook"},
+        {"id": 2, "rule_id": "a-rule", "host": "h", "pid": 1, "create_time": 1.0, "triggered_at": 100.0, "action": "webhook"},
+        {"id": 4, "rule_id": "a-rule", "host": "h", "pid": 1, "create_time": 1.0, "triggered_at": 200.0, "action": "none"},  # not dispatched
+    ]
+    dispatcher.dispatch_batch_sync(alerts)
+    # ``action='none'`` is filtered, and the remaining are sorted by
+    # triggered_at, rule_id, host, pid, create_time, id.
+    assert emitted == [2, 1, 3]
+
+
+def test_alert_engine_evaluate_sample_notify_flag_defers_dispatch(monkeypatch):
+    """``notify=False`` must collect alerts without sending them."""
+    from collector.alerts import AlertEngine
+    from collector.config import Settings
+    from pathlib import Path
+    import tempfile
+    from collector.db import Database
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "notify.sqlite")
+        db.initialize()
+        settings = Settings(webhook_url="http://example.invalid/hook")
+        engine = AlertEngine(db, settings)
+        db.create_rule({
+            "rule_id": "notify-rule", "name": "N", "metric": "cpu_percent",
+            "operator": "gt", "threshold": 10, "duration": 0,
+            "consecutive_samples": 1, "cooldown": 0, "severity": "warning",
+            "action": "webhook", "enabled": True,
+        })
+        sample_data = {
+            "host": "notify-host", "pid": 1, "process_name": "p", "username": "u",
+            "create_time": 1_700_000_000.0, "timestamp": 1_700_000_010.0,
+            "cpu_percent": 95.0, "memory_percent": 1.0, "memory_rss": 1,
+            "read_bytes": 0, "write_bytes": 0, "state": "running",
+        }
+        calls: list = []
+        monkeypatch.setattr(engine.dispatcher, "_send_webhook", lambda url, alert, timeout: calls.append(alert["id"]))
+        # With notify=False, no webhook is sent even though an alert is triggered.
+        triggered = engine.evaluate_sample(sample_data, notify=False)
+        assert len(triggered) == 1
+        assert calls == []
+        # Deterministic batch dispatch (sync variant for test determinism) sends exactly one.
+        engine.dispatcher.dispatch_batch_sync(triggered)
+        assert len(calls) == 1
+
+
+def test_ingest_uses_post_commit_deterministic_dispatch(client, monkeypatch):
+    """``POST /ingest`` batches must dispatch post-commit in sorted order."""
+    # Create two rules that will both trigger on the same sample.
+    for rule_id, thresh in [("rule-a", 10), ("rule-b", 10)]:
+        payload = {
+            "rule_id": rule_id, "name": f"R {rule_id}", "metric": "cpu_percent",
+            "operator": "gt", "threshold": thresh, "duration": 0,
+            "consecutive_samples": 1, "action": "webhook", "cooldown": 0,
+            "severity": "warning", "enabled": True,
+        }
+        assert client.post("/alerts/rules", json=payload).status_code == 201
+
+    # Capture the order in which the dispatcher is asked to send webhooks.
+    order: list[str] = []
+    engine = client.app.state.alert_engine
+    original_send = engine.dispatcher._send_webhook
+
+    def capturing_send(url, alert, timeout):
+        order.append(alert["rule_id"])
+
+    engine.dispatcher._send_webhook = capturing_send  # type: ignore[assignment]
+    from dataclasses import replace as dc_replace
+    original_settings = engine.dispatcher.settings
+    engine.dispatcher.settings = dc_replace(original_settings, webhook_url="http://hook.invalid/", webhook_timeout_seconds=1.0)
+    try:
+        sample_payload = {
+            "pid": 777, "process_name": "p", "username": "u",
+            "create_time": 1_800_500_000.0, "timestamp": 1_800_500_010.0,
+            "cpu_percent": 99.0, "memory_percent": 1.0, "memory_rss": 1,
+            "read_bytes": 0, "write_bytes": 0, "state": "running",
+        }
+        response = client.post("/ingest", json={"host": "batch-host", "samples": [sample_payload]})
+        assert response.status_code == 200, response.text
+        assert response.json()["alerts_triggered"] == 2
+        # Allow background threads to run.
+        import time, threading
+        deadline = time.time() + 2.0
+        while len(order) < 2 and time.time() < deadline:
+            time.sleep(0.05)
+        # Deterministic order: rule-a before rule-b (sorted by rule_id).
+        assert order == ["rule-a", "rule-b"]
+    finally:
+        engine.dispatcher._send_webhook = original_send  # type: ignore[assignment]
+        engine.dispatcher.settings = original_settings
+        # Join daemon threads to avoid bleed into next tests.
+        import time, threading
+        deadline = time.time() + 2.0
+        for t in list(threading.enumerate()):
+            if t is threading.current_thread():
+                continue
+            if t.daemon and t.is_alive():
+                remaining = max(0.0, deadline - time.time())
+                t.join(timeout=remaining)

@@ -34,7 +34,15 @@ protected.  Whitespace-only tokens are treated as "no token" so a
 typo cannot accidentally lock you out.
 
 The agent reads `AUTH_TOKEN` (or `AGENT_AUTH_TOKEN`) from its
-environment and includes the header automatically.
+environment and includes the header automatically.  The dashboard
+stores the token in `localStorage` under `process-monitor-auth-token`,
+sends both headers on every request, and exposes Save / Clear / Test
+actions in **Settings → Authentication**.  A `401` shows an inline hint
+in Settings and a toast elsewhere; the token is never written to logs,
+query strings, or `localStorage` under a different key.  For automated
+deployments the token can also be injected at load time via
+`window.MONITORING_CONFIG = { authToken: "..." }` before `app.js`
+executes.
 
 ## Ingestion identity
 

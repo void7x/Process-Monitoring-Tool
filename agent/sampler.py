@@ -32,6 +32,16 @@ next agent start) yields a real percentage.
 Defensive handling is preserved for ``NoSuchProcess``, ``ZombieProcess``,
 ``AccessDenied``, ``PermissionError``, and ``OSError`` so a single protected
 or short-lived process does not break the whole host sample.
+
+Cache hygiene
+-------------
+Short-lived processes can otherwise make the baseline cache grow without
+bound.  Each :meth:`sample` call therefore tracks the set of process
+instances observed in that cycle and prunes any baseline whose instance
+was not seen.  When the cache still exceeds ``max_entries`` (for example
+on a host with many concurrent processes) the oldest entries are evicted
+first.  ``forget()`` remains available for tests and operator-initiated
+re-baselining.
 """
 from __future__ import annotations
 
@@ -49,6 +59,10 @@ logger = logging.getLogger("process_monitor.agent.sampler")
 # dashboard.
 CPU_BASELINE_PENDING: float | None = None
 
+# Conservative default: a typical host sees far fewer concurrent process
+# instances; 5000 comfortably covers busy servers while still bounding memory.
+_DEFAULT_MAX_CPU_ENTRIES = 5000
+
 
 class ProcessSampler:
     """Collect bounded, defensive process samples.
@@ -60,13 +74,18 @@ class ProcessSampler:
     baseline percentage.
     """
 
-    def __init__(self, hostname: str):
+    def __init__(self, hostname: str, max_entries: int = _DEFAULT_MAX_CPU_ENTRIES):
         self.hostname = hostname
-        # ``pid -> create_time -> True`` remembers which exact process
-        # instances have already had their CPU baseline primed.  The
+        # ``(pid, create_time) -> last_seen_timestamp`` remembers which exact
+        # process instances have already had their CPU baseline primed.  The
         # ``host + pid + create_time`` triple is the project-wide instance
-        # key, so a reused PID never inherits the old process baseline.
-        self._cpu_primed: dict[tuple[int, float], bool] = {}
+        # key, so a reused PID never inherits the old process baseline.  The
+        # timestamp is used for LRU-style eviction when the table grows large.
+        # For backwards compatibility tests may store ``True`` as a value; the
+        # pruning logic treats any truthy value as a timestamp.
+        self._cpu_primed: dict[tuple[int, float], float] = {}
+        # Allow small limits in tests; production default is 5000.
+        self._max_cpu_entries: int = max(1, int(max_entries))
 
     def forget(self, pid: int | None = None) -> None:
         """Drop CPU baseline memory.
@@ -81,9 +100,60 @@ class ProcessSampler:
         for key in [key for key in self._cpu_primed if key[0] == pid]:
             self._cpu_primed.pop(key, None)
 
+    @property
+    def cpu_cache_size(self) -> int:
+        """Current number of primed process instances held in memory."""
+        return len(self._cpu_primed)
+
+    def _prune_cpu_cache(self, seen: set[tuple[int, float]]) -> int:
+        """Remove baselines for instances not observed in the current cycle.
+
+        Returns the number of entries removed.  The method first discards
+        stale instances (not in ``seen``) and then, if the cache is still
+        over ``_max_cpu_entries``, evicts the oldest entries by
+        ``last_seen`` timestamp so a host with many live processes remains
+        bounded.
+        """
+        pruned = 0
+        if seen:
+            stale = [key for key in list(self._cpu_primed.keys()) if key not in seen]
+            for key in stale:
+                self._cpu_primed.pop(key, None)
+            pruned += len(stale)
+        # Size-based eviction: keep the most recently seen instances.
+        if len(self._cpu_primed) > self._max_cpu_entries:
+            # Sort by last_seen timestamp (oldest first).  Values that are
+            # boolean ``True`` from legacy tests are treated as the oldest
+            # so they are evicted first if necessary.
+            def _ts(item: tuple[tuple[int, float], float]) -> float:
+                value = item[1]
+                if isinstance(value, bool):
+                    return 0.0
+                try:
+                    return float(value)
+                except Exception:
+                    return 0.0
+
+            sorted_items = sorted(self._cpu_primed.items(), key=_ts)
+            excess = len(self._cpu_primed) - self._max_cpu_entries
+            for key, _ in sorted_items[:excess]:
+                self._cpu_primed.pop(key, None)
+            pruned += excess
+            logger.debug(
+                "CPU baseline cache pruned by size limit",
+                extra={"pruned": excess, "remaining": len(self._cpu_primed), "limit": self._max_cpu_entries},
+            )
+        elif pruned:
+            logger.debug(
+                "CPU baseline cache pruned stale entries",
+                extra={"pruned": pruned, "remaining": len(self._cpu_primed)},
+            )
+        return pruned
+
     def sample(self) -> list[dict[str, Any]]:
         timestamp = time.time()
         samples: list[dict[str, Any]] = []
+        seen: set[tuple[int, float]] = set()
         for process in psutil.process_iter(
             ["pid", "name", "username", "create_time", "memory_percent", "memory_info", "io_counters", "status"]
         ):
@@ -95,6 +165,7 @@ class ProcessSampler:
                         continue
                     pid = int(info["pid"])
                     instance_key = (pid, create_time)
+                    seen.add(instance_key)
                     io = info.get("io_counters")
                     memory_info = info.get("memory_info")
                     # Prime the per-process CPU counter on first sight.  The
@@ -110,7 +181,7 @@ class ProcessSampler:
                             # collector can record the rest of the row.
                             cpu_percent: float | None = None
                         else:
-                            self._cpu_primed[instance_key] = True
+                            self._cpu_primed[instance_key] = timestamp
                             cpu_percent = CPU_BASELINE_PENDING
                     else:
                         try:
@@ -121,6 +192,10 @@ class ProcessSampler:
                             cpu_percent = max(0.0, float(process.cpu_percent(interval=None)))
                         except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied, PermissionError, OSError):
                             cpu_percent = None
+                        # Refresh recency even when the read failed so the
+                        # instance is not considered stale while it is still
+                        # being observed.
+                        self._cpu_primed[instance_key] = timestamp
                     samples.append(
                         {
                             "pid": pid,
@@ -140,4 +215,11 @@ class ProcessSampler:
                 continue
             except Exception:
                 logger.exception("Unexpected process sampling error")
+        # Prune baselines for instances not seen in this cycle so short-lived
+        # processes do not accumulate forever.  ``seen`` is empty only when
+        # the host truly has no processes (outside of test mocks), in which
+        # case we keep the cache unchanged to avoid wiping a warm baseline on
+        # a transient enumeration failure.
+        if seen:
+            self._prune_cpu_cache(seen)
         return samples

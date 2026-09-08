@@ -9,8 +9,37 @@
 
   const API_BASE = (window.MONITORING_CONFIG?.apiBase || "/api").replace(/\/$/, "");
   const STORAGE_KEY = "process-monitor-settings";
+  const AUTH_STORAGE_KEY = "process-monitor-auth-token";
   const root = document.getElementById("pageContent");
   const drawerRoot = document.getElementById("drawerRoot");
+  // Load auth token from localStorage or embedded config.  The UI never
+  // writes the token to logs or query strings; it is sent only as a
+  // header (Authorization Bearer / X-Auth-Token) so browser history and
+  // server access logs do not retain it.
+  function loadAuthToken() {
+    try {
+      const fromStorage = localStorage.getItem(AUTH_STORAGE_KEY);
+      if (fromStorage && fromStorage.trim()) return fromStorage.trim();
+    } catch (_) {}
+    const fromConfig = window.MONITORING_CONFIG?.authToken;
+    if (fromConfig && String(fromConfig).trim()) return String(fromConfig).trim();
+    return "";
+  }
+  function saveAuthToken(token) {
+    const value = String(token || "").trim();
+    state.authToken = value;
+    try {
+      if (value) localStorage.setItem(AUTH_STORAGE_KEY, value);
+      else localStorage.removeItem(AUTH_STORAGE_KEY);
+    } catch (_) {}
+  }
+  function getAuthHeaders() {
+    const token = (state.authToken || "").trim();
+    if (!token) return {};
+    // Collector accepts both Authorization: Bearer and X-Auth-Token.
+    // Send both for maximum compatibility with custom proxies.
+    return { "Authorization": `Bearer ${token}`, "X-Auth-Token": token };
+  }
   const state = {
     page: "overview",
     param: "",
@@ -26,6 +55,7 @@
     summary: null,
     metrics: null,
     ruleEditing: null,
+    authToken: loadAuthToken(),
     filters: {
       processSearch: "",
       processHost: "",
@@ -110,24 +140,50 @@
   }
 
   async function apiFetch(path, options = {}, params = {}) {
+    const authHeaders = getAuthHeaders();
+    // Merge auth headers with any caller-provided headers.  Caller headers
+    // win in case of an explicit override, but the token is still included
+    // by default so authenticated deployments work without code changes.
+    const mergedHeaders = { ...authHeaders, ...(options.headers || {}) };
+    const mergedOptions = { cache: "no-store", ...options, headers: mergedHeaders };
     try {
-      const response = await fetch(apiUrl(path, params), { cache: "no-store", ...options });
+      const response = await fetch(apiUrl(path, params), mergedOptions);
       let body = null;
       try { body = await response.json(); } catch (_) { /* non-JSON error */ }
       if (!response.ok) {
         const message = body?.error?.message || `Request failed with status ${response.status}`;
         const error = new Error(message);
         error.status = response.status;
+        if (response.status === 401) {
+          // Authentication failure: do not clear the stored token
+          // automatically (the user may have just mistyped it) but surface
+          // a clear hint and keep the connection pill in offline state so
+          // the banner reflects the problem.
+          setConnection(false);
+          error.isAuthError = true;
+          // Defer toast so callers that handle 401 themselves can suppress
+          // duplicate messaging; most pages will surface the error via
+          // errorState, but the settings page shows a specific hint.
+          if (!options._suppressAuthToast) {
+            window.setTimeout(() => {
+              const inSettings = state.page === "settings";
+              if (!inSettings) showToast("Authentication required", "The collector requires a valid token. Open Settings to update your auth token.", "error");
+            }, 0);
+          }
+          throw error;
+        }
         if (response.status >= 500 || response.status === 0) setConnection(false);
         throw error;
       }
       setConnection(true);
       return body;
     } catch (error) {
+      if (error.isAuthError) throw error;
       if (!error.status || error.status >= 500) setConnection(false);
       throw error;
     }
   }
+  function isAuthError(error) { return Boolean(error && error.status === 401); }
 
   function setConnection(connected) {
     state.connected = connected;
@@ -601,13 +657,111 @@
 
   async function renderSettings(token) {
     let summary = state.summary;
-    if (!summary) { try { summary = await apiFetch("/summary", {}, { window: 3600 }); state.summary = summary; } catch (_) { /* settings can still render */ } }
+    if (!summary) { try { summary = await apiFetch("/summary", {}, { window: 3600 }); state.summary = summary; } catch (err) {
+      if (isAuthError(err)) {
+        // Keep settings renderable even when auth is required; the auth
+        // section below will surface the problem.  Suppress the global
+        // toast so it does not duplicate the inline auth hint.
+      }
+    } }
     if (token !== state.requestToken) return;
-    root.innerHTML = `<div class="page-intro"><div><h2>Settings</h2><p>Control the browser experience without changing collector data or alert behavior.</p></div></div><div class="settings-grid"><section class="card settings-section"><h3>Live updates</h3><p>Polling is intentionally lightweight and can be paused while you investigate a historical view.</p><div class="setting-row"><div class="setting-label"><strong>Refresh interval</strong><small>How often the current view requests fresh data.</small></div><select id="settingsRefresh" class="select-field"><option value="10">Every 10 seconds</option><option value="30">Every 30 seconds</option><option value="60">Every minute</option><option value="300">Every 5 minutes</option></select></div><div class="setting-row"><div class="setting-label"><strong>Live updates</strong><small>Pause polling while keeping the current view visible.</small></div><button class="button ${state.liveUpdates ? "secondary" : ""}" id="settingsLive" type="button">${state.liveUpdates ? "Pause updates" : "Resume updates"}</button></div></section><section class="card settings-section"><h3>Collector connection</h3><p>The dashboard uses the configured same-origin API. Credentials and notification secrets remain server-side.</p><div class="setting-row"><div class="setting-label"><strong>API endpoint</strong><small>Browser request base</small></div><span class="status-badge info">${escapeHtml(API_BASE)}</span></div><div class="setting-row"><div class="setting-label"><strong>Current state</strong><small>Last request result</small></div>${statusBadge(state.connected ? "live" : "offline", state.connected ? "Connected" : "Offline")}</div><div class="setting-row"><div class="setting-label"><strong>Last successful update</strong><small>Browser-local timestamp</small></div><strong style="font-size:11px">${state.lastSuccessfulUpdate ? fullDateTime(state.lastSuccessfulUpdate) : "Not yet"}</strong></div></section><section class="card settings-section"><h3>Collector thresholds</h3><p>These values come from the collector configuration and determine host freshness.</p><div class="setting-row"><div class="setting-label"><strong>Stale after</strong><small>Host has not been seen recently.</small></div><strong style="font-size:11px">${summary?.freshness ? `${number(summary.freshness.stale_after_seconds)} seconds` : "Configured server-side"}</strong></div><div class="setting-row"><div class="setting-label"><strong>Data model</strong><small>Every sample retains exact process identity.</small></div><span class="status-badge live">host · PID · create time</span></div></section></div>`;
+    const hasToken = Boolean((state.authToken || "").trim());
+    const tokenMasked = hasToken ? `${state.authToken.slice(0, 3)}••••${state.authToken.slice(-2)}` : "";
+    root.innerHTML = `<div class="page-intro"><div><h2>Settings</h2><p>Control the browser experience without changing collector data or alert behavior. Authentication is managed here without exposing secrets to logs or URLs.</p></div></div><div class="settings-grid"><section class="card settings-section"><h3>Live updates</h3><p>Polling is intentionally lightweight and can be paused while you investigate a historical view.</p><div class="setting-row"><div class="setting-label"><strong>Refresh interval</strong><small>How often the current view requests fresh data.</small></div><select id="settingsRefresh" class="select-field"><option value="10">Every 10 seconds</option><option value="30">Every 30 seconds</option><option value="60">Every minute</option><option value="300">Every 5 minutes</option></select></div><div class="setting-row"><div class="setting-label"><strong>Live updates</strong><small>Pause polling while keeping the current view visible.</small></div><button class="button ${state.liveUpdates ? "secondary" : ""}" id="settingsLive" type="button">${state.liveUpdates ? "Pause updates" : "Resume updates"}</button></div></section><section class="card settings-section"><h3>Authentication</h3><p>When the collector sets <code>AUTH_TOKEN</code>, every browser request must include it. The token is stored only in your browser (localStorage) and sent as a request header.</p><div class="setting-row" style="flex-direction:column;align-items:stretch;gap:10px"><div class="setting-label" style="width:100%"><strong>Collector auth token</strong><small>Leave empty when authentication is disabled. Stored locally, never logged.</small></div><div style="display:flex;gap:8px;align-items:center"><input id="authTokenInput" class="field" type="password" autocomplete="off" spellcheck="false" placeholder="Paste bearer token…" value="${escapeHtml(state.authToken)}" style="flex:1"><button class="button secondary small" id="authToggleVisibility" type="button" title="Show or hide token" aria-label="Toggle token visibility">${icon("eye")}</button></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="button small" id="authSaveButton" type="button">${icon("check")} Save token</button><button class="button secondary small" id="authClearButton" type="button">Clear token</button><button class="button secondary small" id="authTestButton" type="button">${icon("activity")} Test connection</button></div><div id="authStatus" class="field-help" style="min-height:14px">${hasToken ? `Token saved locally (${escapeHtml(tokenMasked)}). Requests will include <code>Authorization: Bearer</code>.` : `No token stored. The dashboard will work only when the collector is open or a token is saved here.`}</div></div></section><section class="card settings-section"><h3>Collector connection</h3><p>The dashboard uses the configured same-origin API. Credentials and notification secrets remain server-side.</p><div class="setting-row"><div class="setting-label"><strong>API endpoint</strong><small>Browser request base</small></div><span class="status-badge info">${escapeHtml(API_BASE)}</span></div><div class="setting-row"><div class="setting-label"><strong>Current state</strong><small>Last request result</small></div>${statusBadge(state.connected ? "live" : "offline", state.connected ? "Connected" : "Offline")}</div><div class="setting-row"><div class="setting-label"><strong>Last successful update</strong><small>Browser-local timestamp</small></div><strong style="font-size:11px">${state.lastSuccessfulUpdate ? fullDateTime(state.lastSuccessfulUpdate) : "Not yet"}</strong></div><div class="setting-row"><div class="setting-label"><strong>Auth header sent</strong><small>Determines whether /summary and other endpoints are authorized</small></div>${hasToken ? `<span class="status-badge live">${icon("check")} Bearer token</span>` : `<span class="status-badge neutral">None</span>`}</div></section><section class="card settings-section"><h3>Collector thresholds</h3><p>These values come from the collector configuration and determine host freshness.</p><div class="setting-row"><div class="setting-label"><strong>Stale after</strong><small>Host has not been seen recently.</small></div><strong style="font-size:11px">${summary?.freshness ? `${number(summary.freshness.stale_after_seconds)} seconds` : "Configured server-side"}</strong></div><div class="setting-row"><div class="setting-label"><strong>Offline after</strong><small>Host considered disconnected</small></div><strong style="font-size:11px">${summary?.freshness ? `${number(summary.freshness.offline_after_seconds)} seconds` : "Configured server-side"}</strong></div><div class="setting-row"><div class="setting-label"><strong>Data model</strong><small>Every sample retains exact process identity.</small></div><span class="status-badge live">host · PID · create time</span></div></section></div>`;
     const select = document.getElementById("settingsRefresh");
     if (select) { select.value = String(state.refreshInterval); select.onchange = () => { state.refreshInterval = Number(select.value); persistSettings(); scheduleRefresh(); document.getElementById("refreshIntervalLabel").textContent = `${state.refreshInterval}s`; showToast("Refresh interval updated", `Live data will refresh every ${state.refreshInterval} seconds.`, "success"); }; }
     const live = document.getElementById("settingsLive");
     if (live) live.onclick = () => toggleLiveUpdates();
+    const authInput = document.getElementById("authTokenInput");
+    const authSave = document.getElementById("authSaveButton");
+    const authClear = document.getElementById("authClearButton");
+    const authTest = document.getElementById("authTestButton");
+    const authToggle = document.getElementById("authToggleVisibility");
+    const authStatus = document.getElementById("authStatus");
+    if (authToggle && authInput) {
+      authToggle.onclick = () => {
+        const isPassword = authInput.type === "password";
+        authInput.type = isPassword ? "text" : "password";
+        authToggle.innerHTML = icon(isPassword ? "eye" : "eye");
+        initIcons();
+      };
+    }
+    function refreshAuthStatus(message, isError) {
+      if (!authStatus) return;
+      if (message) {
+        authStatus.innerHTML = isError ? `<span style="color:var(--red)">${escapeHtml(message)}</span>` : escapeHtml(message);
+      } else {
+        const has = Boolean((state.authToken || "").trim());
+        if (has) {
+          const masked = `${state.authToken.slice(0, 3)}••••${state.authToken.slice(-2)}`;
+          authStatus.innerHTML = `Token saved locally (${escapeHtml(masked)}). Requests will include <code>Authorization: Bearer</code>.`;
+        } else {
+          authStatus.textContent = "No token stored. The dashboard will work only when the collector is open or a token is saved here.";
+        }
+      }
+    }
+    if (authSave) {
+      authSave.onclick = () => {
+        const next = authInput ? authInput.value.trim() : "";
+        saveAuthToken(next);
+        refreshAuthStatus(next ? "Token saved locally. Retrying connection…" : "Token cleared. Dashboard will attempt unauthenticated requests.");
+        showToast(next ? "Auth token saved" : "Auth token cleared", next ? "The token is stored in this browser only and will be sent with each request." : "Requests will no longer include an Authorization header.", next ? "success" : "success");
+        // Update the auth badge in settings without a full page reload
+        const badgeRow = document.querySelector("#authStatus");
+        // Re-render to update the header badge and status pill
+        renderPage();
+      };
+    }
+    if (authClear) {
+      authClear.onclick = () => {
+        if (authInput) authInput.value = "";
+        saveAuthToken("");
+        refreshAuthStatus("Token cleared. Dashboard will attempt unauthenticated requests.");
+        showToast("Auth token cleared", "The stored token was removed from this browser.", "success");
+        renderPage();
+      };
+    }
+    if (authTest) {
+      authTest.onclick = async () => {
+        const prev = authInput ? authInput.value : state.authToken;
+        // Temporarily use the input value for the test without persisting if the user has not saved yet
+        const testToken = prev.trim();
+        const original = state.authToken;
+        state.authToken = testToken;
+        authTest.disabled = true;
+        authTest.textContent = "Testing…";
+        try {
+          await apiFetch("/health", { _suppressAuthToast: true });
+          // Also try a protected endpoint to verify auth really matters
+          try {
+            await apiFetch("/summary", { _suppressAuthToast: true }, { window: 3600 });
+            refreshAuthStatus("Connection succeeded with this token. Remember to Save if this is the token you want to keep.");
+            showToast("Connection successful", "The collector accepted the token.", "success");
+          } catch (e) {
+            if (isAuthError(e)) {
+              refreshAuthStatus("Token rejected by the collector (401). Check the value and save it again.", true);
+              showToast("Token rejected", "The collector returned 401 for /summary.", "error");
+            } else {
+              refreshAuthStatus("Health succeeded but summary failed: " + e.message, true);
+              showToast("Partial success", e.message, "error");
+            }
+          }
+        } catch (e) {
+          if (isAuthError(e)) {
+            refreshAuthStatus("Token rejected (401) or collector requires authentication.", true);
+            showToast("Authentication failed", e.message, "error");
+          } else {
+            refreshAuthStatus("Connection failed: " + e.message, true);
+            showToast("Connection failed", e.message, "error");
+          }
+        } finally {
+          state.authToken = original;
+          authTest.disabled = false;
+          authTest.innerHTML = `${icon("activity")} Test connection`;
+          initIcons();
+        }
+      };
+    }
   }
 
   async function openProcessDetail(host, pid, createTime) {
@@ -676,6 +830,11 @@
       if ([10, 30, 60, 300].includes(Number(saved.refreshInterval))) state.refreshInterval = Number(saved.refreshInterval);
       if (typeof saved.liveUpdates === "boolean") state.liveUpdates = saved.liveUpdates;
     } catch (_) { /* ignore malformed browser storage */ }
+    // Ensure auth token state reflects what is in storage (in case another tab updated it).
+    try {
+      const liveToken = localStorage.getItem(AUTH_STORAGE_KEY);
+      if (liveToken !== null) state.authToken = liveToken.trim();
+    } catch (_) {}
     const label = document.getElementById("refreshIntervalLabel");
     if (label) label.textContent = `${state.refreshInterval}s`;
   }
@@ -775,6 +934,29 @@
   document.addEventListener("keydown", (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); document.getElementById("globalSearch")?.focus(); } });
   document.addEventListener("click", (event) => { const results = document.getElementById("globalSearchResults"); const search = document.querySelector(".global-search-wrap"); if (results && search && !search.contains(event.target)) results.hidden = true; });
   window.addEventListener("hashchange", () => { document.getElementById("sidebar").classList.remove("open"); document.getElementById("sidebarScrim").hidden = true; drawerRoot.innerHTML = ""; renderPage(); });
+
+
+  // Expose minimal test hooks so jsdom tests can verify auth behavior
+  // without reaching into closure state.  This is intentionally limited
+  // to what the second-pass specification requires.
+  try {
+    window.__processMonitor = window.__processMonitor || {};
+    window.__processMonitor.getAuthToken = () => state.authToken;
+    window.__processMonitor.setAuthToken = (t) => saveAuthToken(t);
+    window.__processMonitor.getAuthHeaders = () => getAuthHeaders();
+    window.__processMonitor.AUTH_STORAGE_KEY = AUTH_STORAGE_KEY;
+    window.__processMonitor.cleanup = () => {
+      try { window.clearInterval(state.refreshTimer); } catch(_) {}
+      try { window.clearInterval(state.clockTimer); } catch(_) {}
+      try { window.clearTimeout(state.globalSearchTimer); } catch(_) {}
+      try { window.clearTimeout(state.processSearchTimer); } catch(_) {}
+      try { window.clearTimeout(state.hostSearchTimer); } catch(_) {}
+      try { window.clearTimeout(state.alertSearchTimer); } catch(_) {}
+      try { window.clearTimeout(state.alertHostTimer); } catch(_) {}
+      try { window.clearTimeout(state.historySearchTimer); } catch(_) {}
+      try { window.clearTimeout(state.historyHostTimer); } catch(_) {}
+    };
+  } catch (_) {}
 
   initIcons();
   restoreSettings();

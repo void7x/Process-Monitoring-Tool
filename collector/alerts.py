@@ -17,6 +17,25 @@ from .db import Database
 logger = logging.getLogger("process_monitor.alerts")
 
 
+def _alert_sort_key(alert: dict[str, Any]) -> tuple:
+    """Deterministic ordering for a batch of newly triggered alerts.
+
+    Notifications are dispatched post-commit, outside the ingestion
+    transaction, in a stable order so retries, concurrency, and batch
+    ingestion produce the same observable delivery sequence.  The key
+    mirrors the natural durable order: creation time, rule identity,
+    host identity, and the unique alert id.
+    """
+    return (
+        float(alert.get("triggered_at") or 0),
+        str(alert.get("rule_id") or ""),
+        str(alert.get("host") or ""),
+        int(alert.get("pid") or 0),
+        float(alert.get("create_time") or 0),
+        int(alert.get("id") or 0),
+    )
+
+
 class NotificationDispatcher:
     """Deliver optional notifications without making ingestion brittle.
 
@@ -37,6 +56,46 @@ class NotificationDispatcher:
             return
         thread = threading.Thread(target=self._dispatch_sync, args=(alert,), daemon=True)
         thread.start()
+
+    def dispatch_batch(self, alerts: list[dict[str, Any]]) -> None:
+        """Dispatch a batch of alerts in deterministic order.
+
+        The batch is sorted by a stable key (``triggered_at``, ``rule_id``,
+        ``host``, ``pid``, ``create_time``, ``id``) so that a batch that
+        triggered several rules on several samples always produces the same
+        start order, even when the underlying evaluation order was
+        concurrent.  Each alert is still dispatched on its own daemon thread
+        so a slow endpoint never blocks the caller.
+
+        Callers should invoke this *after* the triggering transaction has
+        committed — it is a post-commit hook, not part of the atomic
+        evaluation.
+        """
+        if not alerts:
+            return
+        # Filter to actionable alerts and sort deterministically.
+        actionable = [a for a in alerts if a.get("action", "none") != "none"]
+        if not actionable:
+            return
+        actionable.sort(key=_alert_sort_key)
+        for alert in actionable:
+            self.dispatch(alert)
+
+    def dispatch_batch_sync(self, alerts: list[dict[str, Any]]) -> None:
+        """Synchronous variant for tests and smoke checks.
+
+        Sorts identically to :meth:`dispatch_batch` but calls
+        :meth:`_dispatch_sync` inline so the caller can assert on delivery
+        without joining background threads.
+        """
+        if not alerts:
+            return
+        actionable = [a for a in alerts if a.get("action", "none") != "none"]
+        if not actionable:
+            return
+        actionable.sort(key=_alert_sort_key)
+        for alert in actionable:
+            self._dispatch_sync(alert)
 
     def _dispatch_sync(self, alert: dict[str, Any]) -> None:
         action = alert.get("action", "none")
@@ -109,7 +168,7 @@ class AlertEngine:
         self.db = db
         self.dispatcher = NotificationDispatcher(settings)
 
-    def evaluate_sample(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
+    def evaluate_sample(self, sample: dict[str, Any], *, notify: bool = True) -> list[dict[str, Any]]:
         """Update rule state for a sample and return newly triggered alerts.
 
         State keys include host, PID, and create_time. This is the important
@@ -127,6 +186,14 @@ class AlertEngine:
         transaction so two simultaneous ingestion requests for the same
         process instance can never create duplicate alerts or corrupt the
         consecutive-sample count.
+
+        When ``notify`` is ``True`` (the default) each newly triggered alert
+        is dispatched immediately via :meth:`NotificationDispatcher.dispatch`.
+        Batch ingestion callers such as ``POST /ingest`` pass
+        ``notify=False`` and dispatch the collected alerts once, post-commit,
+        in a deterministic order via :meth:`dispatch_triggered_batch`.  This
+        keeps the ingestion transaction small and makes the notification
+        sequence stable across concurrent workers.
         """
         triggered: list[dict[str, Any]] = []
         for rule in self.db.list_rules(enabled=True):
@@ -150,5 +217,38 @@ class AlertEngine:
                 continue
             for alert in result.get("newly_triggered", []):
                 triggered.append(alert)
-                self.dispatcher.dispatch(alert)
+                if notify:
+                    self.dispatcher.dispatch(alert)
+        return triggered
+
+    def dispatch_triggered_batch(self, alerts: list[dict[str, Any]]) -> None:
+        """Post-commit, deterministic dispatch of a batch of triggered alerts.
+
+        Sorts by ``(_alert_sort_key)`` and dispatches each alert on a
+        background thread.  This is the preferred entry point for
+        ``POST /ingest`` batch handling: evaluate all samples first (with
+        ``notify=False``), then call this once so the observable delivery
+        order is stable and the database transaction has already committed.
+        """
+        self.dispatcher.dispatch_batch(alerts)
+
+    def evaluate_sample_sync(self, sample: dict[str, Any]) -> list[dict[str, Any]]:
+        """Synchronous evaluation used by smoke tests.
+
+        Like :meth:`evaluate_sample` but dispatches inline for deterministic
+        testing.  Not used on the request path.
+        """
+        triggered: list[dict[str, Any]] = []
+        for rule in self.db.list_rules(enabled=True):
+            metric = rule["metric"]
+            if metric not in sample:
+                continue
+            raw_value = sample[metric]
+            if raw_value is None:
+                continue
+            result = self.db.evaluate_alert_atomic(rule=rule, sample=sample)
+            for alert in result.get("newly_triggered", []):
+                triggered.append(alert)
+        if triggered:
+            self.dispatcher.dispatch_batch_sync(triggered)
         return triggered
