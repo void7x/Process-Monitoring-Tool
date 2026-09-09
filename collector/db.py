@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS samples (
     create_time REAL NOT NULL,
     timestamp REAL NOT NULL,
     received_at REAL NOT NULL,
-    cpu_percent REAL NOT NULL,
+    cpu_percent REAL,
     memory_percent REAL NOT NULL,
     memory_rss INTEGER NOT NULL,
     read_bytes INTEGER NOT NULL,
@@ -146,6 +146,45 @@ class Database:
                     "UPDATE samples SET received_at = COALESCE(received_at, timestamp, ?) WHERE received_at IS NULL",
                     (time.time(),),
                 )
+                # The original schema declared ``cpu_percent REAL NOT NULL``,
+                # but a process's first sample legitimately has no CPU reading
+                # until the agent primes a baseline.  Recreate the table with
+                # a nullable column to allow that "baseline pending" sentinel
+                # to be stored honestly rather than coerced to 0.
+                if "cpu_percent" in existing:
+                    row = connection.execute(
+                        "SELECT \"notnull\" FROM pragma_table_info('samples') WHERE name='cpu_percent'"
+                    ).fetchone()
+                    if row and int(row[0]) == 1:
+                        connection.executescript(
+                            """
+                            CREATE TABLE samples_new (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                host TEXT NOT NULL,
+                                pid INTEGER NOT NULL CHECK(pid >= 0),
+                                process_name TEXT NOT NULL,
+                                username TEXT,
+                                create_time REAL NOT NULL,
+                                timestamp REAL NOT NULL,
+                                received_at REAL NOT NULL,
+                                cpu_percent REAL,
+                                memory_percent REAL NOT NULL,
+                                memory_rss INTEGER NOT NULL,
+                                read_bytes INTEGER NOT NULL,
+                                write_bytes INTEGER NOT NULL,
+                                state TEXT NOT NULL DEFAULT 'running',
+                                UNIQUE(host, pid, create_time, timestamp)
+                            );
+                            INSERT INTO samples_new (id, host, pid, process_name, username, create_time,
+                                timestamp, received_at, cpu_percent, memory_percent, memory_rss,
+                                read_bytes, write_bytes, state)
+                            SELECT id, host, pid, process_name, username, create_time, timestamp,
+                                received_at, cpu_percent, memory_percent, memory_rss, read_bytes,
+                                write_bytes, state FROM samples;
+                            DROP TABLE samples;
+                            ALTER TABLE samples_new RENAME TO samples;
+                            """
+                        )
             connection.executescript(SCHEMA)
             # Some early databases relied on application-level duplicate
             # checks. De-duplicate once before adding the durable unique index.
@@ -184,6 +223,12 @@ class Database:
         The unique key is host + pid + create_time + timestamp. A process that
         reuses a PID therefore gets an independent history, while retried HTTP
         payloads do not create duplicate rows.
+
+        ``cpu_percent`` may be ``None`` to indicate the agent has not yet
+        primed a baseline for that process.  It is stored as ``NULL`` so the
+        "baseline pending" sentinel is preserved through the entire pipeline
+        rather than being silently coerced to ``0.0`` (which would falsely
+        look like a real idle reading).
         """
         received_at = received_at or time.time()
         accepted = 0
@@ -192,6 +237,15 @@ class Database:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             for sample in samples:
+                cpu_value = sample.get("cpu_percent")
+                # ``None`` is preserved so the dashboard and alert engine can
+                # distinguish "no reading yet" from "real 0%".  The
+                # ``memory_percent`` and IO counters are always present.
+                if cpu_value is not None:
+                    try:
+                        cpu_value = float(cpu_value)
+                    except (TypeError, ValueError):
+                        cpu_value = None
                 values = (
                     host,
                     int(sample["pid"]),
@@ -200,7 +254,7 @@ class Database:
                     float(sample["create_time"]),
                     float(sample["timestamp"]),
                     received_at,
-                    float(sample["cpu_percent"]),
+                    cpu_value,
                     float(sample["memory_percent"]),
                     int(sample["memory_rss"]),
                     int(sample["read_bytes"]),
@@ -401,6 +455,167 @@ class Database:
                 """, (resolved_at, resolved_at, current_value, alert_id)
             )
 
+    def evaluate_alert_atomic(
+        self,
+        *,
+        rule: dict[str, Any],
+        sample: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Evaluate one rule against one sample inside a single transaction.
+
+        Concurrency-safe alert evaluation.  The entire ``read state →
+        evaluate → write state → trigger/resolve alert`` flow runs in one
+        ``BEGIN IMMEDIATE`` transaction.  ``BEGIN IMMEDIATE`` acquires the
+        SQLite RESERVED lock up front so two concurrent ingestion requests
+        for the same ``(rule_id, host, pid, create_time)`` are serialized
+        instead of racing on read-modify-write.
+
+        Returns a dict describing the outcome:
+
+        * ``state``: the alert state after the evaluation.
+        * ``active``: the active alert row (or ``None``).
+        * ``newly_triggered``: a list of new alert rows created during this
+          call.  This is what the alert engine should send notifications
+          for.
+        * ``resolved``: a list of alerts that this call transitioned from
+          active → resolved.
+        """
+        triggered: list[dict[str, Any]] = []
+        resolved: list[dict[str, Any]] = []
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rule_id = rule["rule_id"]
+                host = sample["host"]
+                pid = sample["pid"]
+                create_time = sample["create_time"]
+                value = float(sample[rule["metric"]])
+                timestamp = float(sample["timestamp"])
+                state_row = connection.execute(
+                    """
+                    SELECT * FROM alert_states
+                    WHERE rule_id=? AND host=? AND pid=? AND create_time=?
+                    """, (rule_id, host, pid, create_time)
+                ).fetchone()
+                if state_row is None:
+                    state = {
+                        "rule_id": rule_id,
+                        "host": host,
+                        "pid": pid,
+                        "create_time": create_time,
+                        "true_since": None,
+                        "consecutive_samples": 0,
+                        "last_sample_at": None,
+                        "cooldown_until": 0,
+                        "active_alert_id": None,
+                    }
+                else:
+                    state = self._with_compat_fields(dict(state_row))
+                last_sample_at = state.get("last_sample_at")
+                if last_sample_at is not None and timestamp <= float(last_sample_at):
+                    # Out-of-order sample — preserve history but do not
+                    # touch state.  The transaction has nothing to commit.
+                    connection.execute("COMMIT")
+                    return {"state": state, "active": None, "newly_triggered": [], "resolved": []}
+                condition = self._matches(value, rule["operator"], float(rule["threshold"]))
+                active_row = connection.execute(
+                    """
+                    SELECT * FROM alerts
+                    WHERE rule_id=? AND host=? AND pid=? AND create_time=? AND status='active'
+                    ORDER BY id DESC LIMIT 1
+                    """, (rule_id, host, pid, create_time)
+                ).fetchone()
+                if condition:
+                    if state.get("true_since") is None:
+                        state["true_since"] = timestamp
+                    state["consecutive_samples"] = int(state.get("consecutive_samples") or 0) + 1
+                    state["last_sample_at"] = timestamp
+                    if active_row is not None:
+                        active = self._with_compat_fields(dict(active_row))
+                        connection.execute(
+                            "UPDATE alerts SET current_value=?, last_seen=?, process_name=?, username=? WHERE id=? AND status='active'",
+                            (value, timestamp, sample["process_name"], sample.get("username"), active["id"]),
+                        )
+                        state["active_alert_id"] = active["id"]
+                    else:
+                        duration_met = timestamp - float(state["true_since"] or timestamp) >= float(rule["duration"])
+                        samples_met = int(state["consecutive_samples"]) >= int(rule["consecutive_samples"])
+                        cooldown_over = timestamp >= float(state.get("cooldown_until") or 0)
+                        if duration_met and samples_met and cooldown_over:
+                            cursor = connection.execute(
+                                """
+                                INSERT INTO alerts(rule_id, rule_name, host, pid, process_name, username,
+                                    create_time, metric, operator, threshold, current_value, severity,
+                                    status, triggered_at, last_seen, action)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                                """,
+                                (
+                                    rule_id, rule["name"], host, pid, sample["process_name"], sample.get("username"),
+                                    create_time, rule["metric"], rule["operator"], rule["threshold"], value,
+                                    rule["severity"], timestamp, timestamp, rule.get("action", "none"),
+                                ),
+                            )
+                            new_id = cursor.lastrowid
+                            active = self._with_compat_fields(
+                                dict(connection.execute("SELECT * FROM alerts WHERE id=?", (new_id,)).fetchone())
+                            )
+                            state["active_alert_id"] = new_id
+                            triggered.append(active)
+                else:
+                    if active_row is not None:
+                        active = self._with_compat_fields(dict(active_row))
+                        connection.execute(
+                            """
+                            UPDATE alerts SET status='resolved', resolved_at=?, last_seen=?,
+                                current_value=COALESCE(?, current_value)
+                            WHERE id=? AND status='active'
+                            """, (timestamp, timestamp, value, active["id"])
+                        )
+                        state["cooldown_until"] = timestamp + float(rule["cooldown"])
+                        state["active_alert_id"] = None
+                        resolved.append(active)
+                    state["true_since"] = None
+                    state["consecutive_samples"] = 0
+                    state["last_sample_at"] = timestamp
+                connection.execute(
+                    """
+                    INSERT INTO alert_states(rule_id, host, pid, create_time, true_since,
+                        consecutive_samples, last_sample_at, cooldown_until, active_alert_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(rule_id, host, pid, create_time) DO UPDATE SET
+                        true_since=excluded.true_since,
+                        consecutive_samples=excluded.consecutive_samples,
+                        last_sample_at=excluded.last_sample_at,
+                        cooldown_until=excluded.cooldown_until,
+                        active_alert_id=excluded.active_alert_id
+                    """,
+                    (
+                        state["rule_id"], state["host"], state["pid"], state["create_time"], state.get("true_since"),
+                        state.get("consecutive_samples", 0), state.get("last_sample_at"), state.get("cooldown_until", 0),
+                        state.get("active_alert_id"),
+                    ),
+                )
+                connection.execute("COMMIT")
+                return {
+                    "state": state,
+                    "active": self._with_compat_fields(dict(active_row)) if active_row is not None else None,
+                    "newly_triggered": triggered,
+                    "resolved": resolved,
+                }
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    @staticmethod
+    def _matches(value: float, operator: str, threshold: float) -> bool:
+        return {
+            "gt": value > threshold,
+            "gte": value >= threshold,
+            "lt": value < threshold,
+            "lte": value <= threshold,
+            "eq": value == threshold,
+        }.get(operator, False)
+
     def list_alerts(
         self,
         *,
@@ -441,6 +656,10 @@ class Database:
             total = int(connection.execute(count_sql, params).fetchone()["count"])
             rows = self._dicts(connection.execute(sql, [*params, limit, offset]).fetchall())
         return rows, total
+
+    def get_alert(self, alert_id: int) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            return self._dict(connection.execute("SELECT * FROM alerts WHERE id=?", (int(alert_id),)).fetchone())
 
     def active_alert_count(self) -> int:
         with self.connect() as connection:
@@ -557,7 +776,13 @@ class Database:
         last_seen = float(host_row["last_seen"])
         age = max(0.0, now - last_seen)
         status = "live" if age <= stale_after else "stale" if age <= offline_after else "offline"
-        cpu = sum(max(0.0, float(row["cpu_percent"])) for row in rows)
+        # ``cpu_percent`` may be ``None`` for a brand-new process whose
+        # baseline has not been primed.  Treat those as 0 so the host total
+        # is never negative and never driven by a phantom value.
+        cpu = sum(
+            (0.0 if row.get("cpu_percent") is None else max(0.0, float(row["cpu_percent"])))
+            for row in rows
+        )
         memory = min(100.0, sum(max(0.0, float(row["memory_percent"])) for row in rows))
         return {
             "host": host_row["host"],
@@ -778,7 +1003,22 @@ class Database:
         active_hosts = [host for host in hosts if host["status"] == "live"]
         stale_hosts = [host for host in hosts if host["status"] == "stale"]
         current_rows = [row for row in latest if now - float(row["received_at"]) <= offline_after]
-        cpu = sum(max(0.0, float(row["cpu_percent"])) for row in current_rows)
+        # ``total_running_processes`` is the count of *latest* process
+        # instances that are actually in the ``running`` state right now.
+        # The previous implementation counted every latest record regardless
+        # of state, which made the KPI's name misleading.  Unknown / blank
+        # states are deliberately excluded from the running total — they are
+        # not "running" until the agent confirms they are.
+        running_rows = [row for row in current_rows if str(row.get("state") or "").lower() == "running"]
+        # ``cpu_percent`` may legitimately be ``NULL`` for the very first
+        # sample of a brand-new process instance.  Those rows contribute
+        # ``0`` to the CPU total so a brand-new process does not falsify a
+        # negative delta, but they are still counted as a running process
+        # below.
+        cpu = sum(
+            (0.0 if row.get("cpu_percent") is None else max(0.0, float(row["cpu_percent"])))
+            for row in current_rows
+        )
         memory = min(100.0, sum(max(0.0, float(row["memory_percent"])) for row in current_rows))
         return {
             "generated_at": now,
@@ -790,7 +1030,7 @@ class Database:
             "kpis": {
                 "live_hosts": len(active_hosts),
                 "total_hosts": len(hosts),
-                "total_running_processes": len(current_rows),
+                "total_running_processes": len(running_rows),
                 "active_alerts": self.active_alert_count(),
                 "cpu_percent": round(cpu, 2),
                 "memory_percent": round(memory, 2),

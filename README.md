@@ -10,10 +10,11 @@ Detailed guides live in [`docs/`](docs/index.md): quick start, Windows and Docke
 
 ## What is included
 
-- **Agent** — Windows/Linux process sampling with `psutil`, graceful shutdown, retry/backoff, and a bounded JSONL outage spool.
-- **Collector** — FastAPI service, SQLite WAL persistence, typed request validation, health/readiness endpoints, structured error responses, host freshness, history, rules, alert state, and optional webhook/email dispatch.
-- **Dashboard** — Overview, hosts, process explorer, process-instance detail drawer, alerts, rules CRUD, history, and settings with loading/empty/error/offline states.
-- **Tests** — API, database identity/idempotency, alert duration/consecutive/cooldown behavior, PID reuse isolation, and agent buffering/sampling checks.
+- **Agent** — Windows/Linux process sampling with `psutil`, graceful shutdown, retry/backoff, a bounded JSONL outage spool, and a pruned per-instance CPU baseline cache that stays bounded even with many short-lived processes.
+- **Collector** — FastAPI service, SQLite WAL persistence, typed request validation, health/readiness endpoints, structured error responses, host freshness, history, rules, alert state, deterministic post-commit webhook/email dispatch, and optional authentication.
+- **Dashboard** — Overview, hosts, process explorer, process-instance detail drawer, alerts, rules CRUD, history, and settings with loading/empty/error/offline states, a professional light theme with clear hierarchy, and built-in auth-token management.
+- **Incident Analyzer** — evidence-based reconstruction for a single alert (`host + pid + create_time` in the 60 s window before the alert) with previous/peak/delta/duration calculations, a chronological timeline from actual samples, and deterministic evidence such as “CPU increased sharply” or “Insufficient telemetry” — never fabricates causes and is scoped by instance + timestamp range (see `collector/incidents.py` and `docs/incident-analyzer.md`).
+- **Tests** — API, database identity/idempotency, alert duration/consecutive/cooldown behavior, PID reuse isolation, agent buffering/sampling and CPU-cache pruning, deterministic notification ordering, incident history/PID-reuse/insufficient/fabrication/API/frontend interaction coverage, and frontend auth-header coverage.
 
 ## Important correctness guarantees
 
@@ -26,6 +27,33 @@ host + pid + create_time + timestamp
 `create_time` is part of the process-instance key everywhere: the SQLite unique constraint, latest-process query, alert state, active alerts, process detail, and historical series. If a process exits and its PID is reused, the new process cannot inherit the old process history or alert streak. Re-sending the same sample is safe because ingestion uses an idempotent unique constraint.
 
 Historical samples are retained independently of host freshness. A host can become stale or offline without deleting its process history.
+
+### Second-pass hardening (CPU cache, deterministic notifications, auth UI, professional theme)
+
+- **CPU baseline cache pruning** — the agent tracks a `(pid, create_time)` → last-seen map and prunes entries not seen in the current cycle.  When the table would exceed its bound (default 5000 entries) the oldest entries are evicted first.  This keeps memory bounded on hosts with heavy churn while preserving the `None` on first-sample semantics and PID-reuse isolation.
+- **Deterministic post-commit dispatch** — `POST /ingest` evaluates all rules with `notify=False`, commits the `BEGIN IMMEDIATE` alert transaction, and then dispatches the collected alerts once, sorted by `(triggered_at, rule_id, host, pid, create_time)`.  Notifications are therefore post-commit, never block ingestion, and produce a stable observable order even under concurrent batches.
+- **Frontend auth token support** — when `AUTH_TOKEN` is configured the dashboard reads the token from `localStorage` (or `window.MONITORING_CONFIG.authToken`), sends it as both `Authorization: Bearer …` and `X-Auth-Token` on every API request, surfaces 401 failures with an inline hint in Settings, and provides Save / Clear / Test actions in the Settings page.  The token is never logged or added to URLs.
+- **Professional UI redesign** — the dashboard now uses refined design tokens, layered shadows, improved typography and spacing, clearer KPI and host cards, more readable data tables, and a polished empty/error state.  All behavioral selectors (`.kpi-card.tone-*`, `.alert-row.alert-*`, etc.) are preserved so existing tests remain valid.
+
+### First-sample CPU behavior
+
+`psutil.Process.cpu_percent(interval=None)` is a *delta* measurement: the
+first call after a process appears has no previous baseline and would
+otherwise return `0.0`.  The agent therefore emits `cpu_percent: null`
+on the first sample of every `host + pid + create_time` instance and a
+real percentage on every subsequent sample.  The collector stores
+`NULL` for that field, and the alert engine skips CPU-based rules
+when the reading is unavailable.  This avoids creating or resolving an
+alert based on a phantom "idle" reading for a brand-new process.
+
+### Running Processes KPI
+
+The `total_running_processes` KPI in `/summary` is the count of
+*latest* process instances whose `state` field is exactly `running`.
+A process that is `sleeping`, `stopped`, `idle`, or whose state is
+unknown is **not** counted as running, even if a sample was received
+recently.  This is the operational definition of "running" and is
+the value the dashboard reports.
 
 ## Quick start: local development
 
@@ -57,6 +85,8 @@ Run checks:
 ```bash
 python -m compileall -q collector agent tests
 python -m pytest -q
+node --check ui/app.js
+node --test ui/tests/*.test.js   # frontend tests
 ```
 
 ## Docker Compose
@@ -145,6 +175,10 @@ Example payload:
 - `PUT` or `PATCH /alerts/rules/{rule_id}`
 - `DELETE /alerts/rules/{rule_id}`
 
+### Incident Analyzer
+
+- `GET /incidents/{alert_id}` (also `/api/incidents/{alert_id}` and `/alerts/{alert_id}/incident`) — evidence-based reconstruction for the exact `host + pid + create_time` instance over the 60 s window before the alert (configurable `?window=10..3600`).  Returns `{ incident, process, summary, timeline, evidence, window }` where `summary` includes previous/peak/delta/duration and `timeline` is chronological from real samples; when `summary.is_insufficient` is true the `evidence` reports “Insufficient telemetry” and never fabricates a cause.  Scoped queries use `host + pid + create_time + timestamp BETWEEN window_start AND window_end` via `Database.history`; no full DB scans.  Dashboard: each alert row exposes a “View Incident” affordance that opens a panel/modal with loading/empty/error/real-data states using the existing design language.  See `docs/incident-analyzer.md`.
+
 Rule fields:
 
 - `metric`: `cpu_percent`, `memory_percent`, `memory_rss`, `read_bytes`, or `write_bytes`.
@@ -157,7 +191,7 @@ Rule fields:
 - `severity`: `info`, `warning`, or `critical`.
 - `enabled`: whether new samples are evaluated.
 
-Alert state is persisted and keyed by `rule_id + host + pid + create_time`. Active alerts resolve when a later sample for that exact process instance clears the condition. Optional delivery is configured server-side with `ALERT_WEBHOOK_URL` or SMTP variables; missing delivery configuration never makes ingestion fail.
+Alert state is persisted and keyed by `rule_id + host + pid + create_time`. Active alerts resolve when a later sample for that exact process instance clears the condition. Optional delivery is configured server-side with `ALERT_WEBHOOK_URL` or SMTP variables; missing delivery configuration never makes ingestion fail. Delivery is dispatched post-commit in a deterministic sorted order (see `docs/alerts.md`). The dashboard includes first-class auth-token handling: the token is stored only in browser `localStorage`, sent on every non-health request, and manageable from Settings.
 
 ## Configuration
 
@@ -171,6 +205,18 @@ Alert state is persisted and keyed by `rule_id + host + pid + create_time`. Acti
 | `MAX_REQUEST_BYTES` | `5000000` | Request size guard |
 | `RETENTION_DAYS` | `30` | Sample cleanup horizon for operators that call pruning |
 | `CORS_ORIGINS` | `*` | Comma-separated allowed dashboard origins |
+| `AUTH_TOKEN` | *(empty)* | Optional bearer token. When set, the agent and dashboard must present `Authorization: Bearer <token>` (or `X-Auth-Token`) for every non-health request. The dashboard stores the token in `localStorage` under `process-monitor-auth-token` and manages it from Settings (Save/Clear/Test), sending both headers on each request. |
+| `AUTH_PROTECT_DOCS` | `false` | When `true`, `/docs` and `/openapi.json` also require the token. |
+| `ALERT_WEBHOOK_URL` | *(empty)* | Optional webhook endpoint for `action: webhook` rules. |
+| `ALERT_WEBHOOK_TIMEOUT_SECONDS` | `5` | Webhook request timeout. |
+| `SMTP_HOST` | *(empty)* | Optional SMTP host for `action: email` rules. |
+| `SMTP_PORT` | `587` | SMTP port. Use 465 with `SMTP_USE_SSL=true` for implicit TLS. |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | *(empty)* | Optional SMTP credentials. |
+| `SMTP_USE_TLS` | `true` | Send `STARTTLS` after connecting. |
+| `SMTP_USE_SSL` | `false` | Use `SMTP_SSL` (implicit TLS) instead of plain `SMTP`. |
+| `SMTP_TIMEOUT_SECONDS` | `10` | SMTP connection timeout. |
+| `SMTP_FROM` | `process-monitor@localhost` | Envelope From address. |
+| `SMTP_TO` | *(empty)* | Envelope To address. |
 | `COLLECTOR_URL` | `http://127.0.0.1:8000` | Agent ingestion endpoint base |
 | `SAMPLE_INTERVAL_SECONDS` | `5` | Agent sampling interval |
 | `AGENT_BATCH_SIZE` | `100` | Agent batch size |
@@ -198,10 +244,11 @@ The repository layer in `collector/db.py` owns SQL, indexes, freshness queries, 
 
 **The dashboard says Collector unavailable**
 
-1. Visit `/health` on port 8000.
+1. Visit `/health` on port 8000. If it returns 401, the collector requires `AUTH_TOKEN`.
 2. Check that the collector process/container is running.
 3. If the dashboard is on another origin, set `CORS_ORIGINS` to that exact origin.
 4. Use the dashboard Retry button; it retains the last successful update timestamp.
+5. When auth is enabled, open Settings → Authentication, paste the bearer token, Save, and Test connection. The token is sent as `Authorization: Bearer` and `X-Auth-Token` and never appears in URLs or logs.
 
 **No processes are visible**
 

@@ -6,7 +6,7 @@ The API is available at the documented root paths and at `/api/*` aliases. Inter
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/health`, `/ready` | Liveness/readiness |
+| GET | `/health`, `/ready` | Liveness/readiness (always public) |
 | POST | `/ingest` | Idempotent validated agent batch |
 | GET | `/summary` | KPI and host overview |
 | GET | `/metrics/summary` | CPU, memory, activity, and alert series |
@@ -18,6 +18,32 @@ The API is available at the documented root paths and at `/api/*` aliases. Inter
 | GET | `/alerts`, `/alerts/summary` | Alert center and counts |
 | GET/POST | `/alerts/rules` | List/create rules |
 | GET/PUT/PATCH/DELETE | `/alerts/rules/{rule_id}` | Rule CRUD |
+| GET | `/incidents/{alert_id}` (`/api/incidents/{alert_id}`, `/alerts/{alert_id}/incident`) | Process Incident Analyzer — evidence-based reconstruction for a single alert instance |
+
+## Authentication
+
+Authentication is **disabled by default**.  When `AUTH_TOKEN` is set
+to a non-empty value, every request must include one of:
+
+- `Authorization: Bearer <token>`
+- `X-Auth-Token: <token>`
+
+`/health` and `/ready` are always public, so orchestrators and
+container health checks keep working without credentials.  When
+`AUTH_PROTECT_DOCS=true`, `/docs` and `/openapi.json` are also
+protected.  Whitespace-only tokens are treated as "no token" so a
+typo cannot accidentally lock you out.
+
+The agent reads `AUTH_TOKEN` (or `AGENT_AUTH_TOKEN`) from its
+environment and includes the header automatically.  The dashboard
+stores the token in `localStorage` under `process-monitor-auth-token`,
+sends both headers on every request, and exposes Save / Clear / Test
+actions in **Settings → Authentication**.  A `401` shows an inline hint
+in Settings and a toast elsewhere; the token is never written to logs,
+query strings, or `localStorage` under a different key.  For automated
+deployments the token can also be injected at load time via
+`window.MONITORING_CONFIG = { authToken: "..." }` before `app.js`
+executes.
 
 ## Ingestion identity
 
@@ -29,4 +55,15 @@ Example:
 {"host":"workstation-01","samples":[{"pid":1234,"process_name":"worker.exe","username":"operator","create_time":1710000000.25,"timestamp":1710000010.25,"cpu_percent":14.2,"memory_percent":1.1,"memory_rss":52428800,"read_bytes":2048,"write_bytes":4096,"state":"running"}]}
 ```
 
+`cpu_percent` may be `null` to indicate the agent has not yet
+established a baseline for that exact process instance.  See
+[Alerts — First-sample CPU](alerts.md#first-sample-cpu).
+
 Queries use bounded `limit`/`offset` values. Process list supports search, host, CPU/memory minimums, active-alert filtering, and allow-listed sort fields. Alert queries support status, severity, host, search, and `since` timestamp.
+
+## Running Processes KPI
+
+`/summary.kpis.total_running_processes` is the number of *latest*
+process instances whose `state` is exactly `running`.  Other states
+(`sleeping`, `stopped`, `idle`, `unknown`, blank) are not counted,
+so the metric name and the value always describe the same thing.

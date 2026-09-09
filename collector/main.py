@@ -16,8 +16,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .alerts import AlertEngine
+from .auth import install_auth
 from .config import Settings
 from .db import Database
+from .incidents import DEFAULT_INCIDENT_WINDOW_SECONDS, IncidentAnalyzer
 from .schemas import HealthResponse, IngestRequest, IngestResponse, RuleCreate, RuleListResponse, RuleResponse, RuleUpdate
 
 logging.basicConfig(
@@ -103,17 +105,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ),
         lifespan=lifespan,
     )
+    incident_analyzer = IncidentAnalyzer(db, window_seconds=DEFAULT_INCIDENT_WINDOW_SECONDS)
     app.state.settings = settings
     app.state.db = db
     app.state.alert_engine = engine
+    app.state.incident_analyzer = incident_analyzer
     app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_bytes)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
         allow_credentials=settings.allowed_origins != ["*"],
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
+        allow_headers=["*", "Authorization", "X-Auth-Token"],
     )
+    install_auth(app, settings)
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
@@ -163,15 +168,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=413,
             )
         result = db.insert_samples(payload.host, [sample.model_dump() for sample in payload.samples])
-        newly_triggered = []
+        newly_triggered: list[dict[str, Any]] = []
         for sample in result["inserted"]:
             try:
-                newly_triggered.extend(engine.evaluate_sample(sample))
+                # ``notify=False`` defers notification until after the batch
+                # has been committed.  This makes the ingestion transaction
+                # small and allows the dispatcher to emit alerts in a
+                # deterministic, sorted order once durability is guaranteed.
+                newly_triggered.extend(engine.evaluate_sample(sample, notify=False))
             except Exception:
                 # The sample is durable even if a malformed legacy rule or an
                 # optional dispatcher has a problem. Log the incident and keep
                 # the agent's ingestion contract reliable.
                 logger.exception("Alert evaluation failed", extra={"host": payload.host, "pid": sample.get("pid")})
+        # Post-commit, deterministic dispatch.  All alert state has been
+        # committed via ``evaluate_alert_atomic``; notifications now run in a
+        # stable sorted order (triggered_at, rule_id, host, pid,
+        # create_time) so concurrent batches produce the same observable
+        # delivery sequence and retries never cause duplicate commits.
+        if newly_triggered:
+            try:
+                engine.dispatch_triggered_batch(newly_triggered)
+            except Exception:
+                logger.exception("Post-commit alert dispatch failed", extra={"count": len(newly_triggered)})
         logger.info(
             "Samples ingested",
             extra={"host": payload.host, "accepted": result["accepted"], "duplicates": result["duplicates"]},
@@ -378,6 +397,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not db.delete_rule(rule_id):
             raise _error("not_found", "Rule was not found.", status_code=404)
         return {"status": "deleted", "rule_id": rule_id}
+
+    @app.get("/incidents/{alert_id}", tags=["incidents"])
+    @app.get("/api/incidents/{alert_id}", tags=["incidents"], include_in_schema=False)
+    @app.get("/alerts/{alert_id}/incident", tags=["incidents"], include_in_schema=False)
+    @app.get("/api/alerts/{alert_id}/incident", tags=["incidents"], include_in_schema=False)
+    async def get_incident(
+        alert_id: int, window: int | None = Query(default=None, ge=10, le=3600)
+    ) -> dict[str, Any]:
+        analysis = incident_analyzer.analyze(alert_id, window_seconds=window)
+        if analysis is None:
+            raise _error("not_found", "Incident was not found.", status_code=404)
+        return analysis
 
     # Serve the self-contained dashboard when the collector is run directly.
     # Docker uses the dedicated nginx UI service, but this makes local startup
