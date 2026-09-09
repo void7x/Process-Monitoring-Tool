@@ -172,15 +172,29 @@ kbd {
 .menu-button { display: none; }
 
 .update-bar {
-  min-height: 36px; display: flex; align-items: center; justify-content: space-between;
+  min-height: 38px; display: flex; align-items: center; justify-content: space-between;
   padding: 0 24px; background: #FFFFFF; border-bottom: 1px solid var(--border);
   font-size: 11px; color: var(--text-muted);
+  box-shadow: 0 1px 0 rgba(15,23,42,0.02);
 }
 .live-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: 0 0 8px; }
 .live-pulse.paused { background: var(--amber); }
 .live-pulse.error { background: var(--red); }
 .text-button { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--text-muted); font-size: 11px; font-weight: 600; }
 .text-button:hover { background: var(--surface-muted); color: var(--text); border-color: var(--border); }
+.live-toggle {
+  display: inline-flex; align-items: center; gap: 7px;
+  min-height: 28px; padding: 0 12px;
+  border-radius: 999px; border: 1px solid var(--border);
+  background: #FFFFFF; color: var(--text-soft);
+  font-size: 12px; font-weight: 600; line-height: 1;
+  box-shadow: var(--shadow-sm);
+  transition: background var(--ease), border-color var(--ease), color var(--ease), box-shadow var(--ease);
+}
+.live-toggle:hover { background: var(--surface-hover); border-color: var(--border-strong); color: var(--text); box-shadow: var(--shadow-md); }
+.live-toggle:active { transform: translateY(0.5px); }
+.live-toggle.is-paused { background: var(--amber-soft); border-color: var(--amber-border); color: #92400e; }
+.live-toggle svg { width: 14px; height: 14px; flex: 0 0 14px; }
 .separator { width: 1px; height: 14px; background: var(--border); }
 
 /* Page */

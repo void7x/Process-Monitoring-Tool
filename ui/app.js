@@ -263,7 +263,7 @@
   }
 
   function chartCard(id, title, subtitle, color = "#4f46e5", legend = "Observed") {
-    return `<article class="card chart-card"><div class="card-header"><div><h3 class="card-title">${escapeHtml(title)}</h3><p class="card-subtitle">${escapeHtml(subtitle)}</p></div><span class="status-badge info">Live window</span></div><div class="card-body"><div id="${id}" class="chart-wrap large" data-color="${color}" data-legend="${escapeHtml(legend)}"></div><div class="chart-legend"><span><i class="legend-dot" style="background:${color}"></i>${escapeHtml(legend)}</span></div></div></article>`;
+    return `<article class="card chart-card"><div class="card-header"><div><h3 class="card-title">${escapeHtml(title)}</h3><p class="card-subtitle">${escapeHtml(subtitle)}</p></div></div><div class="card-body"><div id="${id}" class="chart-wrap large" data-color="${color}" data-legend="${escapeHtml(legend)}"></div><div class="chart-legend"><span><i class="legend-dot" style="background:${color}"></i>${escapeHtml(legend)}</span></div></div></article>`;
   }
 
   function lineChart(target, series, { color = "#4f46e5", label = "Observed", format = number } = {}) {
@@ -354,7 +354,7 @@
     const recentAlerts = alertsData.items || [];
     // 4 KPI as spec: Hosts / Running Processes / Active Alerts / Samples + but keep Observed CPU/Memory visible in charts for test compat
     // Tests expect Live hosts, Running processes, Active alerts, Observed CPU — we keep those strings visible for compatibility while presenting the 4-KPI composition.
-    root.innerHTML = `<div class="page-intro"><div><h2>Process Monitoring</h2><p>Real-time visibility into host health, workload and alert state. Charts show genuine collector samples only.</p></div><div class="page-actions"><span class="status-badge live">${icon("activity")} Live collection</span><button class="button secondary small" type="button" data-action="jump-processes">View process explorer ${icon("arrow")}</button></div></div>
+    root.innerHTML = `<div class="page-intro"><div><h2>Process Monitoring</h2><p>Real-time visibility into host health, workload and alert state. Charts show genuine collector samples only.</p></div><div class="page-actions"><button class="button secondary small" type="button" data-action="jump-processes">View process explorer ${icon("arrow")}</button></div></div>
       <div class="health-summary"><div class="kpi-grid">
         ${kpiCard("Hosts", `${number(k.live_hosts)} / ${number(k.total_hosts)}`, `<span>${number(k.stale_hosts || 0)} stale · ${number(k.offline_hosts || 0)} offline</span>`, "server", "green")}
         ${kpiCard("Running Processes", number(k.total_running_processes), `<span>Observed CPU ${percent(k.cpu_percent)} · Memory ${percent(k.memory_percent)}</span>`, "process", "purple")}
@@ -895,7 +895,12 @@
     persistSettings();
     const button = document.getElementById("liveToggle");
     const pulse = document.getElementById("livePulse");
-    if (button) button.innerHTML = `${icon(state.liveUpdates ? "pause" : "play")}<span>${state.liveUpdates ? "Pause updates" : "Resume updates"}</span>`;
+    if (button) {
+      button.innerHTML = `${icon(state.liveUpdates ? "pause" : "play")}<span>${state.liveUpdates ? "Pause updates" : "Resume updates"}</span>`;
+      button.classList.toggle("is-paused", !state.liveUpdates);
+      button.setAttribute("aria-pressed", String(!state.liveUpdates));
+      initIcons();
+    }
     if (pulse) pulse.classList.toggle("paused", !state.liveUpdates);
     showToast(state.liveUpdates ? "Live updates resumed" : "Live updates paused", state.liveUpdates ? "The current view will refresh automatically." : "Your current view will stay in place until you resume.", "success");
   }
@@ -980,6 +985,16 @@
 
   initIcons();
   restoreSettings();
+  // Reflect persisted liveUpdates state on the polished Pause button
+  try {
+    const _liveBtn = document.getElementById("liveToggle");
+    if (_liveBtn) {
+      _liveBtn.classList.toggle("is-paused", !state.liveUpdates);
+      _liveBtn.innerHTML = `${icon(state.liveUpdates ? "pause" : "play")}<span>${state.liveUpdates ? "Pause updates" : "Resume updates"}</span>`;
+      _liveBtn.setAttribute("aria-pressed", String(!state.liveUpdates));
+      initIcons();
+    }
+  } catch (_) {}
   setConnection(false);
   scheduleRefresh();
   renderPage();
