@@ -182,28 +182,17 @@
     const dot = document.getElementById("sidebarStatusDot");
     const sidebarText = document.getElementById("sidebarConnectionText");
     const pulse = document.getElementById("livePulse");
-    const banner = document.getElementById("offlineBanner");
     if (pill) { pill.classList.toggle("live", connected); pill.classList.toggle("error", !connected); }
     if (text) text.textContent = connected ? "Connected" : "Offline";
     if (dot) { dot.classList.toggle("live", connected); dot.classList.toggle("error", !connected); }
     if (sidebarText) sidebarText.textContent = connected ? "Collector connected" : "Collector offline";
     if (pulse) { pulse.classList.toggle("error", !connected); pulse.classList.toggle("paused", !state.liveUpdates && connected); }
-    if (banner) banner.hidden = connected;
-    if (!connected) updateOfflineMessage();
-  }
-  function updateOfflineMessage() {
-    const message = document.getElementById("offlineMessage");
-    if (!message) return;
-    message.textContent = state.lastSuccessfulUpdate
-      ? `Last successful update ${relativeTime(state.lastSuccessfulUpdate)}. Check whether the collector service is running.`
-      : "Check whether the collector service is running, then retry.";
   }
   function markUpdated() {
     state.lastUpdated = Date.now() / 1000;
     state.lastSuccessfulUpdate = state.lastUpdated;
     const text = document.getElementById("updateText");
     if (text) text.textContent = `Updated ${relativeTime(state.lastUpdated)}`;
-    updateOfflineMessage();
   }
   function relativeTime(value) {
     if (!value) return "never";

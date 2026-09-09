@@ -183,15 +183,6 @@ kbd {
 .text-button:hover { background: var(--surface-muted); color: var(--text); border-color: var(--border); }
 .separator { width: 1px; height: 14px; background: var(--border); }
 
-.offline-banner {
-  margin: 12px 24px 0; padding: 12px 14px; display: flex; align-items: center; gap: 12px;
-  background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; color: #991b1b; font-size: 12px;
-}
-.offline-banner > [data-icon] { width: 18px; height: 18px; color: var(--red); flex: 0 0 18px; }
-.offline-banner div { flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.offline-banner strong { font-size: 12px; }
-.offline-banner span { color: #b91c1c; font-size: 11px; }
-
 /* Page */
 .page-content { max-width: var(--content-max); margin: 0 auto; padding: 24px 24px 32px; }
 .page-intro { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
@@ -523,7 +514,6 @@ code { font-family: ui-monospace, monospace; background: var(--surface-muted); b
   .topbar { padding: 0 16px; }
   .update-bar { padding: 0 16px; }
   .page-content { padding: 16px; }
-  .offline-banner { margin: 12px 16px 0; }
   .settings-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 650px) {
